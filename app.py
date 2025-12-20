@@ -199,8 +199,12 @@ if _is_streamlit_cloud():
 
 
 # ============================================================
-# ✅ Authentication (Email / Google Workspace) using Streamlit built-in auth (st.login, st.user)
+#  ✅ Authentication (Google/OIDC) using Streamlit built-in auth
+# - Uses named provider: st.login("google") to match [auth.google]
+# - Adds a preflight check that prints EXACTLY what's missing
 # ============================================================
+AUTH_PROVIDER = str(st.secrets.get("AUTH_PROVIDER", "google") or "google").strip()
+
 def _get_allowlists() -> Tuple[List[str], List[str]]:
     allowed_domains = st.secrets.get("ALLOWED_DOMAINS", "")
     allowed_emails = st.secrets.get("ALLOWED_EMAILS", "")
@@ -209,7 +213,6 @@ def _get_allowlists() -> Tuple[List[str], List[str]]:
     return doms, ems
 
 def _user_email() -> str:
-    # Streamlit built-in: st.user.email is available after st.login()
     try:
         u = getattr(st, "user", None)
         if not u:
@@ -218,31 +221,72 @@ def _user_email() -> str:
     except Exception:
         return ""
 
+def _auth_secrets_preflight() -> List[str]:
+    """
+    Returns list of missing auth keys based on your chosen provider.
+    Expects Secrets like:
+
+    [auth]
+    redirect_uri = "..."
+    cookie_secret = "..."
+
+    [auth.google]
+    client_id = "..."
+    client_secret = "..."
+    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+    """
+    missing = []
+    try:
+        auth_block = st.secrets.get("auth", {})
+        if not isinstance(auth_block, dict):
+            auth_block = {}
+
+        if not str(auth_block.get("redirect_uri", "")).strip():
+            missing.append("[auth].redirect_uri")
+        if not str(auth_block.get("cookie_secret", "")).strip():
+            missing.append("[auth].cookie_secret")
+
+        provider_block = auth_block.get(AUTH_PROVIDER, {})
+        if not isinstance(provider_block, dict):
+            provider_block = {}
+
+        if not str(provider_block.get("client_id", "")).strip():
+            missing.append(f"[auth.{AUTH_PROVIDER}].client_id")
+        if not str(provider_block.get("client_secret", "")).strip():
+            missing.append(f"[auth.{AUTH_PROVIDER}].client_secret")
+        if not str(provider_block.get("server_metadata_url", "")).strip():
+            missing.append(f"[auth.{AUTH_PROVIDER}].server_metadata_url")
+
+    except Exception:
+        # if secrets structure is weird, just report generic missing
+        missing.append("auth secrets parse error")
+
+    return missing
+
 def require_login() -> str:
-    """
-    Enforces login if Streamlit auth is configured.
-    - If auth is not configured, app continues (demo/dev friendly).
-    - If configured, requires Google/OIDC login and checks allowlist.
-    """
     doms, ems = _get_allowlists()
 
-    # If Streamlit auth isn't available, just pass through (older Streamlit/dev env)
-    if not hasattr(st, "login"):
+    if not hasattr(st, "login") or not hasattr(st, "user"):
+        # older streamlit / local dev fallback
         return ""
 
-    # If no allowlists defined, still require login when auth configured (recommended),
-    # but allowlists can be empty meaning "any authenticated user".
+    # ✅ Preflight: show EXACT missing keys instead of StreamlitAuthError()
+    missing = _auth_secrets_preflight()
+    if missing:
+        st.error("Auth is not configured correctly in Streamlit Cloud Secrets.")
+        st.write("Missing:")
+        for k in missing:
+            st.write(f"- {k}")
+        st.stop()
+
     try:
-        # If already logged in, st.user will be populated
-        email = _user_email()
-        if email:
-            # allowlist check
+        if getattr(st.user, "is_logged_in", False):
+            email = _user_email()
+
             if ems and email in ems:
                 return email
-            if doms and ("@" in email):
-                domain = email.split("@")[-1]
-                if domain in doms:
-                    return email
+            if doms and ("@" in email) and email.split("@")[-1] in doms:
+                return email
             if (not doms) and (not ems):
                 return email
 
@@ -251,20 +295,18 @@ def require_login() -> str:
                 st.logout()
             st.stop()
 
-        # Not logged in yet → show login UI
         st.info("Please sign in to continue.")
-        st.login()  # Streamlit built-in auth. :contentReference[oaicite:3]{index=3}
+        st.login(AUTH_PROVIDER)  # ✅ matches [auth.google]
         st.stop()
+
     except Exception as e:
-        st.error("Authentication error.")
+        st.error("Authentication error (details below).")
+        st.code(f"{type(e).__name__}: {e!s}")
         st.code(repr(e))
         st.stop()
 
-    return ""
-
 AUTH_EMAIL = require_login()
 
-# Header mini user indicator
 if AUTH_EMAIL:
     st.caption(f"Signed in as: **{AUTH_EMAIL}**")
     if hasattr(st, "logout"):
@@ -1607,5 +1649,6 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
