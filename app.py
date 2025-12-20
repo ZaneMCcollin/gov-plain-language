@@ -264,28 +264,49 @@ def _auth_secrets_preflight() -> List[str]:
     return missing
 
 def require_login() -> str:
-    doms, ems = _get_allowlists()
-
-    if not hasattr(st, "login") or not hasattr(st, "user"):
-        # older streamlit / local dev fallback
+    """
+    Enforces login if Streamlit auth is configured.
+    - If auth is not configured, app continues (dev/local friendly).
+    - If configured, requires Google/OIDC login and checks allowlist.
+    """
+    # If Streamlit auth is not available (older Streamlit / local dev)
+    if not hasattr(st, "login"):
+        st.caption("Auth disabled (st.login not available).")
         return ""
 
-    # ✅ Preflight: show EXACT missing keys instead of StreamlitAuthError()
- st.info("Please sign in to continue.")
-st.login(AUTH_PROVIDER)
-st.stop()
-
-
     try:
-        if getattr(st.user, "is_logged_in", False):
-            email = _user_email()
+        # Already logged in
+        u = getattr(st, "user", None)
+        if u and getattr(u, "email", None):
+            email = u.email.strip().lower()
 
+            doms, ems = _get_allowlists()
+
+            # Allowlist checks
             if ems and email in ems:
                 return email
-            if doms and ("@" in email) and email.split("@")[-1] in doms:
+            if doms and "@" in email and email.split("@")[1] in doms:
                 return email
-            if (not doms) and (not ems):
+            if not doms and not ems:
                 return email
+
+            st.error("Access denied: your email is not allowed.")
+            if hasattr(st, "logout"):
+                st.logout()
+            st.stop()
+
+        # Not logged in yet
+        st.info("Please sign in to continue.")
+        st.login()
+        st.stop()
+
+    except Exception as e:
+        st.error("Authentication error.")
+        st.code(repr(e))
+        st.stop()
+
+    return ""
+
 
             st.error("Access denied: your email is not on the allowlist.")
             if hasattr(st, "logout"):
@@ -1646,6 +1667,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
