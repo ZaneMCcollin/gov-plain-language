@@ -1,4 +1,5 @@
 streamlit
+Authlib>=1.3.2
 google-genai
 pypdf
 python-docx
