@@ -271,13 +271,10 @@ def require_login() -> str:
         return ""
 
     # ✅ Preflight: show EXACT missing keys instead of StreamlitAuthError()
-    missing = _auth_secrets_preflight()
-    if missing:
-        st.error("Auth is not configured correctly in Streamlit Cloud Secrets.")
-        st.write("Missing:")
-        for k in missing:
-            st.write(f"- {k}")
-        st.stop()
+ st.info("Please sign in to continue.")
+st.login(AUTH_PROVIDER)
+st.stop()
+
 
     try:
         if getattr(st.user, "is_logged_in", False):
@@ -1649,6 +1646,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
