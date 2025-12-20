@@ -79,6 +79,7 @@ def _bootstrap_project_files() -> None:
         "requirements.txt",
         "\n".join([
             "streamlit>=1.42.0",
+            "Authlib>=1.3.2",
             "google-genai",
             "pypdf",
             "python-docx",
@@ -1606,4 +1607,5 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
