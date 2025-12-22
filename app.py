@@ -73,8 +73,10 @@ def _write_if_missing(path: str, content: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
+
 def _bootstrap_project_files() -> None:
     # ✅ Pin Streamlit new enough to support st.login / st.user
+    # ✅ Authlib required for Google auth on Streamlit Community Cloud
     _write_if_missing(
         "requirements.txt",
         "\n".join([
@@ -118,7 +120,6 @@ def _bootstrap_project_files() -> None:
             "ENV PORT=8080",
             "EXPOSE 8080",
             "",
-            # ✅ PORT-safe for Cloud Run (Streamlit Cloud ignores Dockerfile)
             'CMD ["bash","-lc","streamlit run app.py --server.port=${PORT:-8080} --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"]',
             ""
         ])
@@ -156,6 +157,7 @@ def _bootstrap_project_files() -> None:
         ])
     )
 
+
 _bootstrap_project_files()
 
 
@@ -173,8 +175,7 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", os.path.join(LOCAL_DATA_DIR, "app.db
 OCR_LOW_CONF = int(os.environ.get("OCR_LOW_CONF", "60"))
 OCR_MED_CONF = int(os.environ.get("OCR_MED_CONF", "80"))
 
-# ✅ Usage analytics: optional "billing rate" (per 1K tokens) for rough estimates
-BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")  # set to nonzero if you want
+BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
 
 
 # ============================================================
@@ -185,47 +186,101 @@ st.title("🇨🇦 GovCan Plain Language Converter")
 
 
 # ============================================================
-# Streamlit Cloud demo warning (SQLite persistence not guaranteed on Community Cloud)
+# Hosted-mode warning (Streamlit Cloud demo: disk persistence not guaranteed)
 # ============================================================
 def _is_streamlit_cloud() -> bool:
-    # best-effort detection (safe + non-blocking)
-    host = (os.environ.get("HOSTNAME", "") or "").lower()
-    # many Streamlit Cloud containers have random hostnames; also set "STREAMLIT_SERVER_HEADLESS"
-    return bool(os.environ.get("STREAMLIT_SERVER_HEADLESS")) and ("cloud" in host or "streamlit" in host or True)
+    return bool(os.environ.get("STREAMLIT_SERVER_HEADLESS"))
+
 
 if _is_streamlit_cloud():
-    st.caption("Running in hosted mode. Note: local file storage (including SQLite) may not persist across reboots on Community Cloud.")
-    # Docs confirm local persistence isn't guaranteed on Community Cloud. :contentReference[oaicite:2]{index=2}
+    st.caption("Running in hosted mode. Note: local file storage (including SQLite) may not persist across reboots on Streamlit Community Cloud.")
 
 
 # ============================================================
-#  ✅ Authentication (Google/OIDC) using Streamlit built-in auth
-# - Uses named provider: st.login("google") to match [auth.google]
-# - Adds a preflight check that prints EXACTLY what's missing
+# ✅ Authentication (FIXED)
+# - Only calls st.login('google') IF auth keys exist in Secrets
+# - Shows EXACTLY what's missing instead of StreamlitAuthError() / internal error
 # ============================================================
 AUTH_PROVIDER = str(st.secrets.get("AUTH_PROVIDER", "google") or "google").strip()
 
-# ============================================================
-# ✅ Authentication (Streamlit built-in Google auth)
-# ============================================================
 
-def _get_allowlists():
+def _get_allowlists() -> Tuple[List[str], List[str]]:
     allowed_domains = st.secrets.get("ALLOWED_DOMAINS", "")
     allowed_emails = st.secrets.get("ALLOWED_EMAILS", "")
     doms = [d.strip().lower() for d in str(allowed_domains).split(",") if d.strip()]
     ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
     return doms, ems
 
-def require_login():
-    # If Streamlit auth is unavailable (local / older runtime)
+
+def _auth_missing_keys() -> List[str]:
+    """
+    Expected Secrets TOML structure:
+
+    [auth]
+    redirect_uri = "https://APP.streamlit.app/oauth2callback"
+    cookie_secret = "..."
+
+    [auth.google]
+    client_id = "..."
+    client_secret = "..."
+    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+    """
+    missing: List[str] = []
+    try:
+        auth = st.secrets.get("auth", None)
+        if not isinstance(auth, dict):
+            return ["[auth]"]
+        if not auth.get("redirect_uri"):
+            missing.append("[auth].redirect_uri")
+        if not auth.get("cookie_secret"):
+            missing.append("[auth].cookie_secret")
+
+        g = auth.get("google", None)
+        if not isinstance(g, dict):
+            missing.append("[auth.google]")
+            return missing
+        if not g.get("client_id"):
+            missing.append("[auth.google].client_id")
+        if not g.get("client_secret"):
+            missing.append("[auth.google].client_secret")
+        if not g.get("server_metadata_url"):
+            missing.append("[auth.google].server_metadata_url")
+    except Exception:
+        # if secrets parsing is weird, treat as missing
+        return ["[auth]"]
+
+    return missing
+
+
+def _user_email() -> str:
+    try:
+        u = getattr(st, "user", None)
+        if not u:
+            return ""
+        # Streamlit sets st.user.email after login
+        return (getattr(u, "email", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def require_login() -> str:
+    # If Streamlit auth API isn't available, do nothing (local / older runtime)
     if not hasattr(st, "login") or not hasattr(st, "user"):
         st.caption("Auth disabled (local or unsupported runtime).")
         return ""
 
+    missing = _auth_missing_keys()
+    if missing:
+        st.warning("Auth is not configured correctly in Streamlit Cloud Secrets.")
+        st.caption("Missing:")
+        for k in missing:
+            st.write(f"- {k}")
+        return ""  # IMPORTANT: don't call st.login() if misconfigured
+
     try:
-        # Already logged in
-        if getattr(st.user, "is_logged_in", False):
-            email = (st.user.email or "").strip().lower()
+        # If already logged in, st.user.email will be present
+        email = _user_email()
+        if email:
             doms, ems = _get_allowlists()
 
             if ems and email in ems:
@@ -242,7 +297,7 @@ def require_login():
 
         # Not logged in yet
         st.info("Please sign in to continue.")
-        st.login("google")
+        st.login(AUTH_PROVIDER)  # "google"
         st.stop()
 
     except Exception as e:
@@ -251,6 +306,7 @@ def require_login():
         st.stop()
 
     return ""
+
 
 AUTH_EMAIL = require_login()
 
@@ -262,19 +318,19 @@ if AUTH_EMAIL:
                 st.logout()
 
 
-
 # ============================================================
 # Auth roles / permissions
 # ============================================================
 PERMS = {
-    "viewer":   {"convert": True,  "approve": False, "rollback": False, "export": True, "edit_outputs": False, "analytics": False},
-    "editor":   {"convert": True,  "approve": False, "rollback": False, "export": True, "edit_outputs": True,  "analytics": False},
-    "reviewer": {"convert": True,  "approve": True,  "rollback": False, "export": True, "edit_outputs": True,  "analytics": False},
-    "admin":    {"convert": True,  "approve": True,  "rollback": True,  "export": True, "edit_outputs": True,  "analytics": True},
+    "viewer": {"convert": True, "approve": False, "rollback": False, "export": True, "edit_outputs": False, "analytics": False},
+    "editor": {"convert": True, "approve": False, "rollback": False, "export": True, "edit_outputs": True, "analytics": False},
+    "reviewer": {"convert": True, "approve": True, "rollback": False, "export": True, "edit_outputs": True, "analytics": False},
+    "admin": {"convert": True, "approve": True, "rollback": True, "export": True, "edit_outputs": True, "analytics": True},
 }
 
 if "auth_role" not in st.session_state:
     st.session_state.auth_role = "admin"
+
 
 def can(action: str) -> bool:
     return bool(PERMS.get(st.session_state.auth_role, {}).get(action, False))
@@ -335,32 +391,14 @@ def detect_lang(text: str) -> str:
         return "unknown"
 
 def est_tokens_from_text(text: str) -> int:
-    # rough heuristic: ~4 chars/token typical for English
     if not text:
         return 0
     return int(max(1, len(text) / 4))
 
 def money_estimate(tokens_total: int) -> float:
-    # tokens_total is total tokens; BILLING_RATE_PER_1K is cost per 1000 tokens
     if BILLING_RATE_PER_1K <= 0:
         return 0.0
     return round((tokens_total / 1000.0) * BILLING_RATE_PER_1K, 6)
-
-
-# ============================================================
-# Readability
-# ============================================================
-def flesch_kincaid(text: str) -> float:
-    words = len(re.findall(r"\w+", text))
-    sentences = max(1, len(re.findall(r"[.!?]", text)))
-    syllables = sum(len(re.findall(r"[aeiouyAEIOUY]+", w)) for w in text.split())
-    return round(0.39 * (words / sentences) + 11.8 * (syllables / max(1, words)) - 15.59, 2)
-
-def french_readability(text: str) -> float:
-    words = len(re.findall(r"\w+", text))
-    sentences = max(1, len(re.findall(r"[.!?]", text)))
-    syllables = sum(len(re.findall(r"[aeiouyàâäéèêëîïôöùûüÿ]+", w, re.I)) for w in text.split())
-    return round(207 - 1.015 * (words / sentences) - 73.6 * (syllables / max(1, words)), 2)
 
 
 # ============================================================
@@ -395,7 +433,6 @@ def _db_init() -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_versions_doc ON versions(doc_id, id DESC)")
 
-    # ✅ usage_events: billing/analytics insight
     conn.execute("""
         CREATE TABLE IF NOT EXISTS usage_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -420,6 +457,7 @@ def _db_init() -> None:
 
 _db_init()
 
+
 def log_usage(
     action: str,
     user_email: str = "",
@@ -436,6 +474,7 @@ def log_usage(
         tin = est_tokens_from_text(prompt_text or "")
         tout = est_tokens_from_text(output_text or "")
         meta_json = json.dumps(meta or {}, ensure_ascii=False)
+
         conn = _db()
         conn.execute(
             """
@@ -447,76 +486,8 @@ def log_usage(
         conn.commit()
         conn.close()
     except Exception:
-        # analytics should never break primary app flow
         return
 
-def analytics_summary(days: int = 30) -> Dict[str, Any]:
-    since = (datetime.now(timezone.utc).timestamp() - days * 86400)
-    since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
-    conn = _db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT
-          COUNT(*),
-          COALESCE(SUM(est_tokens_in),0),
-          COALESCE(SUM(est_tokens_out),0)
-        FROM usage_events
-        WHERE ts >= ?
-        """,
-        (since_iso,),
-    )
-    total_events, tin, tout = cur.fetchone() or (0, 0, 0)
-
-    cur.execute(
-        """
-        SELECT user_email,
-               COUNT(*) as cnt,
-               COALESCE(SUM(est_tokens_in),0) as tin,
-               COALESCE(SUM(est_tokens_out),0) as tout
-        FROM usage_events
-        WHERE ts >= ?
-        GROUP BY user_email
-        ORDER BY (tin+tout) DESC
-        LIMIT 50
-        """,
-        (since_iso,),
-    )
-    per_user = cur.fetchall() or []
-    conn.close()
-    return {
-        "since_iso": since_iso,
-        "total_events": int(total_events or 0),
-        "tokens_in": int(tin or 0),
-        "tokens_out": int(tout or 0),
-        "tokens_total": int((tin or 0) + (tout or 0)),
-        "estimated_cost": money_estimate(int((tin or 0) + (tout or 0))),
-        "per_user": per_user,
-    }
-
-def analytics_export_csv(days: int = 30) -> bytes:
-    since = (datetime.now(timezone.utc).timestamp() - days * 86400)
-    since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
-    conn = _db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT ts, user_email, action, doc_id, section_id, model, prompt_chars, output_chars, est_tokens_in, est_tokens_out, meta_json
-        FROM usage_events
-        WHERE ts >= ?
-        ORDER BY ts DESC
-        """,
-        (since_iso,),
-    )
-    rows = cur.fetchall() or []
-    conn.close()
-
-    out = io.StringIO()
-    w = csv.writer(out)
-    w.writerow(["ts", "user_email", "action", "doc_id", "section_id", "model", "prompt_chars", "output_chars", "est_tokens_in", "est_tokens_out", "meta_json"])
-    for r in rows:
-        w.writerow(list(r))
-    return out.getvalue().encode("utf-8")
 
 def _ensure_doc(doc_id: str) -> None:
     conn = _db()
@@ -531,6 +502,7 @@ def _ensure_doc(doc_id: str) -> None:
         )
         conn.commit()
     conn.close()
+
 
 def save_version(doc_id: str, snapshot: Dict[str, Any]) -> str:
     _ensure_doc(doc_id)
@@ -554,6 +526,7 @@ def save_version(doc_id: str, snapshot: Dict[str, Any]) -> str:
     conn.close()
     return version_name
 
+
 def list_versions(doc_id: str) -> List[str]:
     conn = _db()
     cur = conn.cursor()
@@ -561,6 +534,7 @@ def list_versions(doc_id: str) -> List[str]:
     rows = cur.fetchall()
     conn.close()
     return [r[0] for r in rows] if rows else []
+
 
 def load_latest(doc_id: str) -> Optional[Dict[str, Any]]:
     conn = _db()
@@ -581,6 +555,7 @@ def load_latest(doc_id: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+
 def load_version(doc_id: str, version_name: str) -> Optional[Dict[str, Any]]:
     conn = _db()
     cur = conn.cursor()
@@ -597,6 +572,7 @@ def load_version(doc_id: str, version_name: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+
 def set_latest(doc_id: str, version_name: str) -> bool:
     conn = _db()
     cur = conn.cursor()
@@ -608,6 +584,7 @@ def set_latest(doc_id: str, version_name: str) -> bool:
     if not row:
         conn.close()
         return False
+
     vid = row[0]
     cur.execute(
         "UPDATE documents SET updated_at = ?, latest_version_id = ? WHERE doc_id = ?",
@@ -1597,6 +1574,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
