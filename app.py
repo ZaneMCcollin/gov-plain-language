@@ -47,6 +47,9 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 
+from collections.abc import Mapping
+
+
 
 APP_BUILD = "authfix-2025-12-22-v1"
 st.sidebar.caption(f"Build: {APP_BUILD}")
@@ -216,22 +219,11 @@ def _get_allowlists() -> Tuple[List[str], List[str]]:
     ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
     return doms, ems
 
-
 def _auth_missing_keys() -> List[str]:
-    """Validate Streamlit auth Secrets for Option A (default provider).
-
-    Expected Secrets:
-
-    [auth]
-    redirect_uri = "https://APP.streamlit.app/oauth2callback"
-    cookie_secret = "..."
-    client_id = "..."
-    client_secret = "..."
-    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
-    """
+    """Validate Streamlit auth Secrets for Option A (default provider)."""
     try:
         auth = st.secrets.get("auth")
-        if not isinstance(auth, dict):
+        if not isinstance(auth, Mapping):
             return ["[auth]"]
 
         required = [
@@ -241,7 +233,14 @@ def _auth_missing_keys() -> List[str]:
             "client_secret",
             "server_metadata_url",
         ]
-        return [f"[auth].{k}" for k in required if not auth.get(k)]
+
+        missing = []
+        for k in required:
+            v = auth.get(k) if hasattr(auth, "get") else auth[k]
+            if not v:
+                missing.append(f"[auth].{k}")
+        return missing
+
     except Exception:
         return ["[auth]"]
 
@@ -256,13 +255,10 @@ def _user_email() -> str:
         return ""
 
 auth_obj = st.secrets.get("auth", None)
-
-
-
 st.sidebar.write({
     "secrets_keys": sorted(list(st.secrets.keys())),
     "auth_type": type(auth_obj).__name__,
-    "auth_keys": sorted(list(auth_obj.keys())) if isinstance(auth_obj, dict) else None
+    "auth_keys": sorted(list(auth_obj.keys())) if isinstance(auth_obj, Mapping) else None
 })
 
 
@@ -1663,6 +1659,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
