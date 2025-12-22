@@ -198,11 +198,11 @@ if _is_streamlit_cloud():
 
 
 # ============================================================
-# ✅ Authentication (FIXED)
-# - Only calls st.login('google') IF auth keys exist in Secrets
-# - Shows EXACTLY what's missing instead of StreamlitAuthError() / internal error
+# ✅ Authentication (Option A: default provider)
+# - Uses Streamlit built-in login (st.login / st.user)
+# - Validates Option A Secrets shape: everything inside [auth]
+# - Optional allowlists via ALLOWED_DOMAINS / ALLOWED_EMAILS (comma-separated)
 # ============================================================
-
 
 def _get_allowlists() -> Tuple[List[str], List[str]]:
     allowed_domains = st.secrets.get("ALLOWED_DOMAINS", "")
@@ -240,55 +240,19 @@ def _auth_missing_keys() -> List[str]:
     except Exception:
         return ["[auth]"]
 
-    [auth]
-    redirect_uri = "https://APP.streamlit.app/oauth2callback"
-    cookie_secret = "..."
-
-    [auth.google]
-    client_id = "..."
-    client_secret = "..."
-    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
-    """
-    missing: List[str] = []
-    try:
-        auth = st.secrets.get("auth", None)
-        if not isinstance(auth, dict):
-            return ["[auth]"]
-        if not auth.get("redirect_uri"):
-            missing.append("[auth].redirect_uri")
-        if not auth.get("cookie_secret"):
-            missing.append("[auth].cookie_secret")
-
-        g = auth.get("google", None)
-        if not isinstance(g, dict):
-            missing.append("[auth.google]")
-            return missing
-        if not g.get("client_id"):
-            missing.append("[auth.google].client_id")
-        if not g.get("client_secret"):
-            missing.append("[auth.google].client_secret")
-        if not g.get("server_metadata_url"):
-            missing.append("[auth.google].server_metadata_url")
-    except Exception:
-        # if secrets parsing is weird, treat as missing
-        return ["[auth]"]
-
-    return missing
-
 
 def _user_email() -> str:
     try:
         u = getattr(st, "user", None)
         if not u:
             return ""
-        # Streamlit sets st.user.email after login
         return (getattr(u, "email", "") or "").strip().lower()
     except Exception:
         return ""
 
 
 def require_login() -> str:
-    # If Streamlit auth API isn't available, do nothing (local / older runtime)
+    # If Streamlit auth API isn't available (local / older runtime), don't block.
     if not hasattr(st, "login") or not hasattr(st, "user"):
         st.caption("Auth disabled (local or unsupported runtime).")
         return ""
@@ -299,19 +263,24 @@ def require_login() -> str:
         st.caption("Missing:")
         for k in missing:
             st.write(f"- {k}")
-        return ""  # IMPORTANT: don't call st.login() if misconfigured
+        return ""  # don't call st.login() if misconfigured
 
     try:
-        # If already logged in, st.user.email will be present
         email = _user_email()
         if email:
             doms, ems = _get_allowlists()
 
-            if ems and email in ems:
-                return email
-            if doms and "@" in email and email.split("@", 1)[1] in doms:
-                return email
-            if not doms and not ems:
+            # Allow rules:
+            # - If ALLOWED_EMAILS is set, email must be in it
+            # - Else if ALLOWED_DOMAINS is set, domain must match
+            # - Else allow anyone who can authenticate
+            if ems:
+                if email in ems:
+                    return email
+            elif doms:
+                if "@" in email and email.split("@", 1)[1] in doms:
+                    return email
+            else:
                 return email
 
             st.error("Access denied: your email is not allowed.")
@@ -319,7 +288,6 @@ def require_login() -> str:
                 st.logout()
             st.stop()
 
-        # Not logged in yet
         st.info("Please sign in to continue.")
         if st.button("Log in"):
             st.login()  # Option A: default provider
@@ -1679,6 +1647,18 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
