@@ -202,7 +202,6 @@ if _is_streamlit_cloud():
 # - Only calls st.login('google') IF auth keys exist in Secrets
 # - Shows EXACTLY what's missing instead of StreamlitAuthError() / internal error
 # ============================================================
-AUTH_PROVIDER = str(st.secrets.get("AUTH_PROVIDER", "google") or "google").strip()
 
 
 def _get_allowlists() -> Tuple[List[str], List[str]]:
@@ -214,8 +213,32 @@ def _get_allowlists() -> Tuple[List[str], List[str]]:
 
 
 def _auth_missing_keys() -> List[str]:
+    """Validate Streamlit auth Secrets for Option A (default provider).
+
+    Expected Secrets:
+
+    [auth]
+    redirect_uri = "https://APP.streamlit.app/oauth2callback"
+    cookie_secret = "..."
+    client_id = "..."
+    client_secret = "..."
+    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
     """
-    Expected Secrets TOML structure:
+    try:
+        auth = st.secrets.get("auth")
+        if not isinstance(auth, dict):
+            return ["[auth]"]
+
+        required = [
+            "redirect_uri",
+            "cookie_secret",
+            "client_id",
+            "client_secret",
+            "server_metadata_url",
+        ]
+        return [f"[auth].{k}" for k in required if not auth.get(k)]
+    except Exception:
+        return ["[auth]"]
 
     [auth]
     redirect_uri = "https://APP.streamlit.app/oauth2callback"
@@ -298,7 +321,8 @@ def require_login() -> str:
 
         # Not logged in yet
         st.info("Please sign in to continue.")
-        st.login(AUTH_PROVIDER)  # "google"
+        if st.button("Log in"):
+            st.login()  # Option A: default provider
         st.stop()
 
     except Exception as e:
@@ -1655,6 +1679,17 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
+
+
+
+
+
+
+
+
+
+
 
 
 
