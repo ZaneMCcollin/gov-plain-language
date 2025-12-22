@@ -51,11 +51,6 @@ from collections.abc import Mapping
 
 
 
-APP_BUILD = "authfix-2025-12-22-v1"
-st.sidebar.caption(f"Build: {APP_BUILD}")
-
-
-
 # ============================================================
 # Auto language detection (patched to show real error)
 # ============================================================
@@ -1659,6 +1654,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
