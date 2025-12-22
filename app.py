@@ -51,6 +51,7 @@ from collections.abc import Mapping
 
 
 
+
 # ============================================================
 # Auto language detection (patched to show real error)
 # ============================================================
@@ -214,6 +215,57 @@ def _get_allowlists() -> Tuple[List[str], List[str]]:
     ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
     return doms, ems
 
+
+def _normalize_email_list(x) -> List[str]:
+    if not x:
+        return []
+    if isinstance(x, str):
+        return [e.strip().lower() for e in x.split(",") if e.strip()]
+    if isinstance(x, list) or isinstance(x, tuple):
+        return [str(e).strip().lower() for e in x if str(e).strip()]
+    return []
+
+
+def _roles_config() -> Dict[str, List[str]]:
+    """
+    Reads from Secrets:
+
+    [roles]
+    admin = ["a@b.com"]
+    reviewer = ["c@d.com"]
+    editor = []
+    viewer = []
+    """
+    r = st.secrets.get("roles", {})
+    if not isinstance(r, Mapping):
+        return {"admin": [], "reviewer": [], "editor": [], "viewer": []}
+
+    return {
+        "admin": _normalize_email_list(r.get("admin")),
+        "reviewer": _normalize_email_list(r.get("reviewer")),
+        "editor": _normalize_email_list(r.get("editor")),
+        "viewer": _normalize_email_list(r.get("viewer")),
+    }
+
+
+def role_for_email(email: str) -> str:
+    email = (email or "").strip().lower()
+    roles = _roles_config()
+
+    # priority order
+    if email and email in roles["admin"]:
+        return "admin"
+    if email and email in roles["reviewer"]:
+        return "reviewer"
+    if email and email in roles["editor"]:
+        return "editor"
+    if email and email in roles["viewer"]:
+        return "viewer"
+
+    # default fallback if not listed
+    return "viewer"
+
+
 def _auth_missing_keys() -> List[str]:
     """Validate Streamlit auth Secrets for Option A (default provider)."""
     try:
@@ -309,6 +361,22 @@ def require_login() -> str:
 
 
 AUTH_EMAIL = require_login()
+if AUTH_EMAIL:
+   with st.sidebar:
+    st.header("Controls")
+
+    locked_role = st.session_state.get("auth_role", "viewer")
+    if locked_role == "admin":
+        st.session_state.auth_role = st.selectbox(
+            "Role (admin can override for testing)",
+            ["viewer", "editor", "reviewer", "admin"],
+            index=["viewer", "editor", "reviewer", "admin"].index(locked_role),
+        )
+    else:
+        st.caption("Role (locked)")
+        st.write(f"**{locked_role}**")
+
+
 
 if AUTH_EMAIL:
     st.caption(f"Signed in as: **{AUTH_EMAIL}**")
@@ -1654,6 +1722,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
