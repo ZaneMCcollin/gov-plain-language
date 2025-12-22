@@ -8,3 +8,4 @@ pypdfium2
 Pillow
 google-cloud-storage
 reportlab
+langdetect
