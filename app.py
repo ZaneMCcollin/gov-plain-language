@@ -255,6 +255,17 @@ def _user_email() -> str:
     except Exception:
         return ""
 
+auth_obj = st.secrets.get("auth", None)
+
+
+
+st.sidebar.write({
+    "secrets_keys": sorted(list(st.secrets.keys())),
+    "auth_type": type(auth_obj).__name__,
+    "auth_keys": sorted(list(auth_obj.keys())) if isinstance(auth_obj, dict) else None
+})
+
+
 
 def require_login() -> str:
     # If Streamlit auth API isn't available (local / older runtime), don't block.
@@ -1652,6 +1663,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
