@@ -365,11 +365,18 @@ if AUTH_EMAIL:
    with st.sidebar:
     st.header("Controls")
 
-    locked_role = st.session_state.get("auth_role", "viewer")
-    if locked_role == "admin":
-    else:
-        st.caption("Role (locked)")
-        st.write(f"**{locked_role}**")
+ locked_role = st.session_state.get("auth_role", "viewer")
+
+if locked_role == "admin":
+    st.session_state.auth_role = st.selectbox(
+        "Role (admin can override for testing)",
+        ["viewer", "editor", "reviewer", "admin"],
+        index=["viewer", "editor", "reviewer", "admin"].index(locked_role),
+    )
+else:
+    st.caption("Role (locked)")
+    st.write(f"**{locked_role}**")
+
 
 
 
@@ -1717,6 +1724,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
