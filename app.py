@@ -33,19 +33,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-st.set_page_config(page_title="My App")
-
-if not st.user.is_logged_in:
-    st.write("You must log in to continue.")
-    if st.button("Log in"):
-        st.login()
-else:
-    st.success(f"Welcome, {st.user.name} 👋")
-
-    if st.button("Log out"):
-        st.logout()
-
-
 from google import genai
 from google.genai.errors import ClientError
 
@@ -1668,6 +1655,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
