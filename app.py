@@ -401,6 +401,86 @@ def money_estimate(tokens_total: int) -> float:
     return round((tokens_total / 1000.0) * BILLING_RATE_PER_1K, 6)
 
 
+def analytics_summary(days: int = 30) -> Dict[str, Any]:
+    since = (datetime.now(timezone.utc).timestamp() - days * 86400)
+    since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
+
+    conn = _db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
+          COUNT(*),
+          COALESCE(SUM(est_tokens_in),0),
+          COALESCE(SUM(est_tokens_out),0)
+        FROM usage_events
+        WHERE ts >= ?
+        """,
+        (since_iso,),
+    )
+    row = cur.fetchone() or (0, 0, 0)
+    total_events, tin, tout = row[0], row[1], row[2]
+
+    cur.execute(
+        """
+        SELECT user_email,
+               COUNT(*) as cnt,
+               COALESCE(SUM(est_tokens_in),0) as tin,
+               COALESCE(SUM(est_tokens_out),0) as tout
+        FROM usage_events
+        WHERE ts >= ?
+        GROUP BY user_email
+        ORDER BY (tin+tout) DESC
+        LIMIT 50
+        """,
+        (since_iso,),
+    )
+    per_user = cur.fetchall() or []
+
+    conn.close()
+    return {
+        "since_iso": since_iso,
+        "total_events": int(total_events or 0),
+        "tokens_in": int(tin or 0),
+        "tokens_out": int(tout or 0),
+        "tokens_total": int((tin or 0) + (tout or 0)),
+        "estimated_cost": money_estimate(int((tin or 0) + (tout or 0))),
+        "per_user": per_user,
+    }
+
+
+def analytics_export_csv(days: int = 30) -> bytes:
+    since = (datetime.now(timezone.utc).timestamp() - days * 86400)
+    since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
+
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT ts, user_email, action, doc_id, section_id, model,
+               prompt_chars, output_chars, est_tokens_in, est_tokens_out, meta_json
+        FROM usage_events
+        WHERE ts >= ?
+        ORDER BY ts DESC
+        """,
+        (since_iso,),
+    )
+    rows = cur.fetchall() or []
+    conn.close()
+
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow([
+        "ts", "user_email", "action", "doc_id", "section_id", "model",
+        "prompt_chars", "output_chars", "est_tokens_in", "est_tokens_out", "meta_json"
+    ])
+    for r in rows:
+        w.writerow(list(r))
+
+    return out.getvalue().encode("utf-8")
+
+
 # ============================================================
 # SQLite storage + ✅ Usage Analytics tables
 # ============================================================
@@ -1574,6 +1654,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
