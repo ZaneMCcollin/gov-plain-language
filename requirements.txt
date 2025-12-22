@@ -1,0 +1,9 @@
+streamlit
+google-genai
+pypdf
+python-docx
+pytesseract
+pypdfium2
+Pillow
+google-cloud-storage
+reportlab
