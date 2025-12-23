@@ -1283,100 +1283,6 @@ def build_docx(snapshot: Dict[str, Any]) -> bytes:
     doc.save(bio)
     return bio.getvalue()
 
-def build_pdf(snapshot: Dict[str, Any]) -> bytes:
-    buff = io.BytesIO()
-    c = canvas.Canvas(buff, pagesize=letter)
-    width, height = letter
-
-    # ✅ Watermark DRAFT vs APPROVED
-    status = overall_doc_status(snapshot)
-    pdf_watermark(c, status, width, height)
-
-    def draw_wrapped(text: str, x: float, y: float, max_width: float, leading: float = 12) -> float:
-        words = text.split()
-        line = ""
-        for w in words:
-            test = (line + " " + w).strip()
-            if c.stringWidth(test) <= max_width:
-                line = test
-            else:
-                c.drawString(x, y, line)
-                y -= leading
-                line = w
-                if y < 1 * inch:
-                    c.showPage()
-                    pdf_watermark(c, status, width, height)
-                    y = height - 1 * inch
-        if line:
-            c.drawString(x, y, line)
-            y -= leading
-        return y
-
-    y = height - 1 * inch
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(1 * inch, y, "GovCan Plain Language Converter")
-    y -= 18
-
-    c.setFont("Helvetica", 10)
-    c.drawString(1 * inch, y, f"Document ID: {snapshot.get('doc_id','')}")
-    y -= 14
-    c.drawString(1 * inch, y, f"Saved: {snapshot.get('saved_at','')}")
-    y -= 14
-
-    meta = snapshot.get("meta", {})
-    c.drawString(1 * inch, y, f"Detected language: {meta.get('detected_lang','unknown')}")
-    y -= 14
-    c.drawString(1 * inch, y, f"OCR used: {meta.get('ocr_used', False)} | OCR failed: {meta.get('ocr_failed', False)} | Pages: {meta.get('pages_requested','')}")
-    y -= 18
-
-    for s in snapshot.get("sections", []):
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(1 * inch, y, s.get("title", "Section"))
-        y -= 16
-
-        c.setFont("Helvetica", 10)
-        c.drawString(1 * inch, y, f"Status: {s.get('status','draft')} | Reviewer: {s.get('reviewer','')}")
-        y -= 14
-
-        if s.get("comment"):
-            y = draw_wrapped(f"Comment: {s.get('comment','')}", 1*inch, y, width - 2*inch, leading=12)
-
-        if s.get("approved_at"):
-            y = draw_wrapped(f"Approved at: {s.get('approved_at','')}", 1*inch, y, width - 2*inch, leading=12)
-
-        y -= 8
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(1 * inch, y, "Original")
-        y -= 12
-        c.setFont("Helvetica", 9)
-        y = draw_wrapped(s.get("original", ""), 1*inch, y, width - 2*inch, leading=11)
-
-        y -= 6
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(1 * inch, y, "English (Plain Language)")
-        y -= 12
-        c.setFont("Helvetica", 9)
-        y = draw_wrapped(s.get("en", ""), 1*inch, y, width - 2*inch, leading=11)
-
-        y -= 6
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(1 * inch, y, "Français (Langage clair)")
-        y -= 12
-        c.setFont("Helvetica", 9)
-        y = draw_wrapped(s.get("fr", ""), 1*inch, y, width - 2*inch, leading=11)
-
-        y -= 10
-        c.setFont("Helvetica-Oblique", 9)
-        c.drawString(1 * inch, y, f"EN Grade: {s.get('grade_en','')} | FR Readability: {s.get('grade_fr','')}")
-        y -= 20
-
-        c.showPage()
-        pdf_watermark(c, status, width, height)
-        y = height - 1 * inch
-
-    c.save()
-    return buff.getvalue()
-
 def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     buff = io.BytesIO()
     c = canvas.Canvas(buff, pagesize=letter)
@@ -1405,7 +1311,11 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     y -= 16
 
     c.setFont("Helvetica", 11)
+
     lines = [
+        "Target: English readability at Grade 8 or below (Flesch–Kincaid).",
+        "Interpretation: Sections marked OVER exceed target and should be revised.",
+        "",
         f"Sections total: {stats['total_sections']}",
         f"Approved: {stats['approved']} | Reviewed: {stats['reviewed']} | Draft: {stats['draft']}",
         f"English grade (avg): {stats['avg_grade_en']} | Sections above Grade 8: {stats['over_grade8']}",
@@ -1414,6 +1324,10 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
         f"OCR used: {stats['ocr_used']} | OCR failed: {stats['ocr_failed']}",
         f"Reviewers: {', '.join(stats['reviewers']) if stats['reviewers'] else '—'}",
     ]
+
+    if stats["ocr_used"]:
+        lines.append("Note: OCR text quality may affect readability scores and translation accuracy.")
+
     for line in lines:
         c.drawString(1 * inch, y, line)
         y -= 14
@@ -1427,10 +1341,12 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     for s in snapshot.get("sections", []) or []:
         title = (s.get("title") or "Section").strip()
         stt = s.get("status", "draft")
+
         try:
             ge = float(s.get("grade_en", 99.0) or 99.0)
         except Exception:
             ge = 99.0
+
         ok = "OK" if ge <= 8 else "OVER"
         trunc = "TRUNC" if s.get("truncated") else ""
         row = f"- {title} | status={stt} | grade_en={ge} ({ok}) {trunc}".strip()
@@ -1446,6 +1362,7 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
 
     c.save()
     return buff.getvalue()
+
 
 
 # ============================================================
@@ -1837,6 +1754,7 @@ with right:
               log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
           else:
               st.caption("Export locked (editor/reviewer/admin only).")
+
 
 
 
