@@ -1558,296 +1558,271 @@ with st.sidebar:
             use_container_width=True
         )
 
-
-
 # ============================================================
 # Main UI
 # ============================================================
 left, right = st.columns(2)
 
 with left:
-    up = st.file_uploader("Upload PDF or DOCX", ["pdf", "docx"])
-    pages = st.slider("PDF pages to extract/preview", 1, 25, 3)
+  up = st.file_uploader("Upload PDF or DOCX", ["pdf", "docx"])
+  pages = st.slider("PDF pages to extract/preview", 1, 25, 3)
 
-    preview = st.toggle("Preview pages", value=False)
-    show_ocr_conf = st.toggle("Show OCR confidence highlighting (OCR only)", value=False)
+  preview = st.toggle("Preview pages", value=False)
+  show_ocr_conf = st.toggle("Show OCR confidence highlighting (OCR only)", value=False)
 
-    if up:
-        b = up.getvalue()
-        key = f"{up.name}:{sha12(b)}:pages={pages}"
+  if up:
+      b = up.getvalue()
+      key = f"{up.name}:{sha12(b)}:pages={pages}"
 
-        should_extract = (key != st.session_state.last_extract_key) or (not st.session_state.input_text.strip())
+      should_extract = (key != st.session_state.last_extract_key) or (not st.session_state.input_text.strip())
+      if should_extract:
+          with st.spinner("Extracting text (OCR if needed)..."):
+              if up.name.lower().endswith(".pdf"):
+                  txt, meta = extract_pdf(b, pages)
+                  if preview:
+                      try:
+                          st.session_state.page_preview_imgs = pdf_to_images(b, pages, dpi=160)
+                      except Exception:
+                          st.session_state.page_preview_imgs = []
+              else:
+                  txt, meta = extract_docx(b)
+                  st.session_state.page_preview_imgs = []
 
-        if should_extract:
-            with st.spinner("Extracting text (OCR if needed)..."):
-                if up.name.lower().endswith(".pdf"):
-                    txt, meta = extract_pdf(b, pages)
-                    if preview:
-                        try:
-                            st.session_state.page_preview_imgs = pdf_to_images(b, pages, dpi=160)
-                        except Exception:
-                            st.session_state.page_preview_imgs = []
-                else:
-                    txt, meta = extract_docx(b)
-                    st.session_state.page_preview_imgs = []
+              txt, truncated_doc = clamp_text(txt, MAX_DOC_CHARS)
+              meta["doc_truncated"] = truncated_doc
+              meta["doc_chars_after_cap"] = len(txt)
 
-                txt, truncated_doc = clamp_text(txt, MAX_DOC_CHARS)
-                meta["doc_truncated"] = truncated_doc
-                meta["doc_chars_after_cap"] = len(txt)
+              st.session_state.last_extract_key = key
+              st.session_state.extract_meta = meta
+              st.session_state.input_text = txt
 
-                st.session_state.last_extract_key = key
-                st.session_state.extract_meta = meta
-                st.session_state.input_text = txt
+  meta = st.session_state.extract_meta or {}
+  if meta:
+      if meta.get("ocr_failed"):
+          st.error("OCR failed ❌ (check tesseract install / language packs)")
+      elif meta.get("ocr_used"):
+          st.success(
+              f"OCR used ✅ — OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | "
+              f"Detected: {meta.get('detected_lang','unknown')}"
+          )
+      else:
+          st.info(f"Native extraction used ✅ — Detected: {meta.get('detected_lang','unknown')}")
 
-    meta = st.session_state.extract_meta or {}
-    if meta:
-        if meta.get("ocr_failed"):
-            st.error("OCR failed ❌ (check tesseract install / language packs)")
-        elif meta.get("ocr_used"):
-            st.success(f"OCR used ✅ — OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | Detected: {meta.get('detected_lang','unknown')}")
-        else:
-            st.info(f"Native extraction used ✅ — Detected: {meta.get('detected_lang','unknown')}")
+      if meta.get("doc_truncated"):
+          st.warning(f"Input capped at {MAX_DOC_CHARS} characters before LLM calls.")
 
-        if meta.get("doc_truncated"):
-            st.warning(f"Input capped at {MAX_DOC_CHARS} characters before LLM calls.")
+      if not LANGDETECT_OK:
+          st.warning("Language detection library not available (langdetect).")
+          if LANGDETECT_ERR:
+              st.code(LANGDETECT_ERR)
+          st.caption(f"Python used by Streamlit: {sys.executable}")
 
-        if not LANGDETECT_OK:
-            st.warning("Language detection library not available (langdetect).")
-            if LANGDETECT_ERR:
-                st.code(LANGDETECT_ERR)
-            st.caption(f"Python used by Streamlit: {sys.executable}")
+  if show_ocr_conf and meta and meta.get("ocr_used") and isinstance(meta.get("ocr_conf", {}), dict):
+      ocr_conf = meta.get("ocr_conf", {})
+      html_pages = ocr_conf.get("html_pages", [])
+      thr = ocr_conf.get("thresholds", {"low": OCR_LOW_CONF, "med": OCR_MED_CONF})
 
-    if show_ocr_conf and meta and meta.get("ocr_used") and isinstance(meta.get("ocr_conf", {}), dict):
-        ocr_conf = meta.get("ocr_conf", {})
-        html_pages = ocr_conf.get("html_pages", [])
-        thr = ocr_conf.get("thresholds", {"low": OCR_LOW_CONF, "med": OCR_MED_CONF})
+      st.subheader("OCR confidence highlighting")
+      st.caption(f"Red < {thr.get('low')} | Orange < {thr.get('med')} (hover words to see confidence)")
+      if html_pages:
+          for i, html in enumerate(html_pages, start=1):
+              st.markdown(f"**Page {i}**")
+              st.markdown(html, unsafe_allow_html=True)
+              st.divider()
+      else:
+          st.info("No OCR confidence data available.")
 
-        st.subheader("OCR confidence highlighting")
-        st.caption(f"Red < {thr.get('low')} | Orange < {thr.get('med')} (hover words to see confidence)")
-        if html_pages:
-            for i, html in enumerate(html_pages, start=1):
-                st.markdown(f"**Page {i}**", unsafe_allow_html=False)
-                st.markdown(html, unsafe_allow_html=True)
-                st.divider()
-        else:
-            st.info("No OCR confidence data available.")
+  if preview and st.session_state.page_preview_imgs:
+      st.subheader("Page preview")
+      for i, img in enumerate(st.session_state.page_preview_imgs, start=1):
+          st.image(img, caption=f"Page {i}", use_container_width=True)
 
-    if preview and st.session_state.page_preview_imgs:
-        st.subheader("Page preview")
-        for i, img in enumerate(st.session_state.page_preview_imgs, start=1):
-            st.image(img, caption=f"Page {i}", use_container_width=True)
+  user_text = st.text_area("Input text", height=320, key="input_text")
 
-     user_text = st.text_area("Input text", height=320, key="input_text")
+  if not can("convert"):
+      st.info("You don’t have permission to convert. Ask an admin to grant editor/admin role.")
 
- if not can("convert"):
-    st.info("You don’t have permission to convert. Ask an admin to grant editor/admin role.")
+  convert_disabled = (not can("convert")) or (not st.session_state.doc_id) or (not user_text.strip())
+  convert_btn = st.button("Convert & Save Version", type="primary", disabled=convert_disabled)
 
-    convert_disabled = (not can("convert")) or (not st.session_state.doc_id) or (not user_text.strip())
-    convert_btn = st.button("Convert & Save Version", type="primary", disabled=convert_disabled)
 
 with right:
-    if convert_btn:
-        safe_text, cut = clamp_text(user_text, MAX_DOC_CHARS)
+  if convert_btn:
+      safe_text, _ = clamp_text(user_text, MAX_DOC_CHARS)
 
-        doc_lang = detect_lang(safe_text)
-        st.session_state.extract_meta = st.session_state.extract_meta or {}
-        st.session_state.extract_meta["detected_lang"] = st.session_state.extract_meta.get("detected_lang") or doc_lang
+      doc_lang = detect_lang(safe_text)
+      st.session_state.extract_meta = st.session_state.extract_meta or {}
+      st.session_state.extract_meta["detected_lang"] = st.session_state.extract_meta.get("detected_lang") or doc_lang
 
-        chunks = split_by_headings(safe_text)
+      chunks = split_by_headings(safe_text)
 
-        out_sections: List[Dict[str, Any]] = []
-        prog = st.progress(0)
-        for i, (title, body) in enumerate(chunks, start=1):
-            chunk_lang = detect_lang(body) if len(body) >= 80 else doc_lang
-            res = convert_chunk(
-                body,
-                source_lang=chunk_lang,
-                doc_id=st.session_state.doc_id,
-                section_id=i - 1,
-                user_email=AUTH_EMAIL,
-            )
+      out_sections: List[Dict[str, Any]] = []
+      prog = st.progress(0)
+      for i, (title, body) in enumerate(chunks, start=1):
+          chunk_lang = detect_lang(body) if len(body) >= 80 else doc_lang
+          res = convert_chunk(
+              body,
+              source_lang=chunk_lang,
+              doc_id=st.session_state.doc_id,
+              section_id=i - 1,
+              user_email=AUTH_EMAIL,
+          )
 
-            out_sections.append({
-                "id": i - 1,
-                "title": title,
-                "original": body,
-                "en": res["en"],
-                "fr": res["fr"],
-                "grade_en": res["grade_en"],
-                "grade_fr": res["grade_fr"],
-                "truncated": res["truncated"],
-                "source_lang": res.get("source_lang", chunk_lang),
-                "status": "draft",
-                "reviewer": "",
-                "comment": "",
-                "approved_at": "",
-            })
-            prog.progress(int(i / max(1, len(chunks)) * 100))
-        prog.empty()
+          out_sections.append({
+              "id": i - 1,
+              "title": title,
+              "original": body,
+              "en": res["en"],
+              "fr": res["fr"],
+              "grade_en": res["grade_en"],
+              "grade_fr": res["grade_fr"],
+              "truncated": res["truncated"],
+              "source_lang": res.get("source_lang", chunk_lang),
+              "status": "draft",
+              "reviewer": "",
+              "comment": "",
+              "approved_at": "",
+          })
+          prog.progress(int(i / max(1, len(chunks)) * 100))
+      prog.empty()
 
-        snap = {
-            "doc_id": st.session_state.doc_id,
-            "saved_at": now_iso(),
-            "meta": st.session_state.extract_meta or {},
-            "source_text": safe_text,
-            "sections": out_sections,
-        }
+      snap = {
+          "doc_id": st.session_state.doc_id,
+          "saved_at": now_iso(),
+          "meta": st.session_state.extract_meta or {},
+          "source_text": safe_text,
+          "sections": out_sections,
+      }
 
-        save_version(st.session_state.doc_id, snap)
-        st.session_state.snapshot = snap
+      save_version(st.session_state.doc_id, snap)
+      st.session_state.snapshot = snap
 
-        log_usage(
-            action="save_version_after_convert",
-            user_email=AUTH_EMAIL,
-            doc_id=st.session_state.doc_id,
-            section_id=None,
-            model=LLM_MODEL,
-            prompt_text="",
-            output_text="",
-            meta={"sections": len(out_sections), "doc_chars": len(safe_text), "doc_words": word_count(safe_text)},
-        )
+      log_usage(
+          action="save_version_after_convert",
+          user_email=AUTH_EMAIL,
+          doc_id=st.session_state.doc_id,
+          section_id=None,
+          model=LLM_MODEL,
+          prompt_text="",
+          output_text="",
+          meta={"sections": len(out_sections), "doc_chars": len(safe_text), "doc_words": word_count(safe_text)},
+      )
 
-        st.success("Saved ✅ (SQLite versioned; approvals/comments persist)")
+      st.success("Saved ✅ (SQLite versioned; approvals/comments persist)")
 
-    snap = st.session_state.snapshot
-    if not snap:
-        st.caption("Upload a document, enter a Document ID, then Convert.")
-    else:
-        st.subheader("Reviewer workflow + exports")
+  snap = st.session_state.snapshot
+  if not snap:
+      st.caption("Upload a document, enter a Document ID, then Convert.")
+  else:
+      st.subheader("Reviewer workflow + exports")
+      st.caption(f"Overall document status: **{overall_doc_status(snap)}**")
 
-        st.caption(f"Overall document status: **{overall_doc_status(snap)}**")
+      sections = snap.get("sections", [])
+      for s in sections:
+          st.markdown(f"## {s.get('title','Section')}")
 
-        sections = snap.get("sections", [])
-        for s in sections:
-            st.markdown(f"## {s.get('title','Section')}")
+          ge = float(s.get("grade_en", 99.0) or 99.0)
+          if ge <= 8:
+              st.success(f"EN Grade {ge} ✔")
+          else:
+              st.warning(f"EN Grade {ge} (above 8)")
 
-            ge = float(s.get("grade_en", 99.0) or 99.0)
-            if ge <= 8:
-                st.success(f"EN Grade {ge} ✔")
-            else:
-                st.warning(f"EN Grade {ge} (above 8)")
+          st.info(f"FR Readability: {s.get('grade_fr', 0.0)}")
+          st.caption(f"Source lang detected: {s.get('source_lang','unknown')}")
 
-            st.info(f"FR Readability: {s.get('grade_fr', 0.0)}")
-            st.caption(f"Source lang detected: {s.get('source_lang','unknown')}")
+          if s.get("truncated"):
+              st.warning(f"Section truncated to {MAX_CHUNK_WORDS} words before LLM call.")
 
-            if s.get("truncated"):
-                st.warning(f"Section truncated to {MAX_CHUNK_WORDS} words before LLM call.")
+          if can("edit_outputs"):
+              s["en"] = st.text_area("English output", value=s.get("en", ""), key=f"en_{s['id']}", height=140)
+              s["fr"] = st.text_area("French output", value=s.get("fr", ""), key=f"fr_{s['id']}", height=140)
+          else:
+              st.markdown("### English")
+              st.write(s.get("en", ""))
+              st.markdown("### Français")
+              st.write(s.get("fr", ""))
 
-            if can("edit_outputs"):
-                s["en"] = st.text_area("English output", value=s.get("en", ""), key=f"en_{s['id']}", height=140)
-                s["fr"] = st.text_area("French output", value=s.get("fr", ""), key=f"fr_{s['id']}", height=140)
-            else:
-                st.markdown("### English")
-                st.write(s.get("en", ""))
-                st.markdown("### Français")
-                st.write(s.get("fr", ""))
+          if can("approve"):
+              s["reviewer"] = st.text_input("Reviewer name", value=s.get("reviewer", ""), key=f"rev_{s['id']}")
+              s["comment"] = st.text_area("Reviewer comment", value=s.get("comment", ""), key=f"com_{s['id']}", height=90)
 
-         if can("approve"):
-    s["reviewer"] = st.text_input("Reviewer name", value=s.get("reviewer", ""), key=f"rev_{s['id']}")
-    s["comment"] = st.text_area("Reviewer comment", value=s.get("comment", ""), key=f"com_{s['id']}", height=90)
+              status_options = ["draft", "reviewed", "approved"]
+              s["status"] = st.selectbox(
+                  "Status",
+                  status_options,
+                  index=status_options.index(s.get("status", "draft")),
+                  key=f"stat_{s['id']}"
+              )
 
-    status_options = ["draft", "reviewed", "approved"]
-    s["status"] = st.selectbox(
-        "Status",
-        status_options,
-        index=status_options.index(s.get("status", "draft")),
-        key=f"stat_{s['id']}"
-    )
+              if s["status"] == "approved" and not s.get("approved_at"):
+                  s["approved_at"] = now_iso()
+              if s["status"] != "approved":
+                  s["approved_at"] = ""
+          else:
+              st.caption("Approval locked (reviewer/admin only).")
 
-    if s["status"] == "approved" and not s.get("approved_at"):
-        s["approved_at"] = now_iso()
-    if s["status"] != "approved":
-        s["approved_at"] = ""
-else:
-    st.caption("Approval locked (reviewer/admin only).")
+          st.divider()
 
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            if st.button("Save changes as new version", disabled=not st.session_state.doc_id):
-                snap["saved_at"] = now_iso()
-                snap["sections"] = sections
-                save_version(st.session_state.doc_id, snap)
-                st.session_state.snapshot = snap
+      c1, c2, c3, c4 = st.columns(4)
 
-                log_usage(
-                    action="save_version_after_review",
-                    user_email=AUTH_EMAIL,
-                    doc_id=st.session_state.doc_id,
-                    section_id=None,
-                    model="",
-                    meta={"overall_status": overall_doc_status(snap)},
-                )
+      with c1:
+          if st.button("Save changes as new version", disabled=not st.session_state.doc_id):
+              snap["saved_at"] = now_iso()
+              snap["sections"] = sections
+              save_version(st.session_state.doc_id, snap)
+              st.session_state.snapshot = snap
 
-                st.success("Saved updated version ✅")
+              log_usage(
+                  action="save_version_after_review",
+                  user_email=AUTH_EMAIL,
+                  doc_id=st.session_state.doc_id,
+                  section_id=None,
+                  model="",
+                  meta={"overall_status": overall_doc_status(snap)},
+              )
+              st.success("Saved updated version ✅")
 
-    with c2:
-    if can("export"):
-        docx_bytes = build_docx(snap)
-        st.download_button(
-            "Download DOCX",
-            data=docx_bytes,
-            file_name=f"{safe_filename(st.session_state.doc_id)}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True
-        )
-        log_usage(
-            action="export_docx",
-            user_email=AUTH_EMAIL,
-            doc_id=st.session_state.doc_id,
-            section_id=None,
-            model="",
-            prompt_text="",
-            output_text="",
-            meta={"bytes": len(docx_bytes)},
-        )
-    else:
-        st.caption("Export locked (editor/reviewer/admin only).")
+      with c2:
+          if can("export"):
+              docx_bytes = build_docx(snap)
+              st.download_button(
+                  "Download DOCX",
+                  data=docx_bytes,
+                  file_name=f"{safe_filename(st.session_state.doc_id)}.docx",
+                  mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  use_container_width=True
+              )
+              log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(docx_bytes)})
+          else:
+              st.caption("Export locked (editor/reviewer/admin only).")
 
-with c3:
-    if can("export"):
-        pdf_bytes = build_pdf(snap)
-        st.download_button(
-            "Download PDF",
-            data=pdf_bytes,
-            file_name=f"{safe_filename(st.session_state.doc_id)}.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
-        log_usage(
-            action="export_pdf_full",
-            user_email=AUTH_EMAIL,
-            doc_id=st.session_state.doc_id,
-            section_id=None,
-            model="",
-            prompt_text="",
-            output_text="",
-            meta={"bytes": len(pdf_bytes)},
-        )
-    else:
-        st.caption("Export locked (editor/reviewer/admin only).")
+      with c3:
+          if can("export"):
+              pdf_bytes = build_pdf(snap)
+              st.download_button(
+                  "Download PDF",
+                  data=pdf_bytes,
+                  file_name=f"{safe_filename(st.session_state.doc_id)}.pdf",
+                  mime="application/pdf",
+                  use_container_width=True
+              )
+              log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(pdf_bytes)})
+          else:
+              st.caption("Export locked (editor/reviewer/admin only).")
 
-with c4:
-    if can("export"):
-        comp_pdf = build_compliance_report_pdf(snap)
-        st.download_button(
-            "Compliance Report (PDF)",
-            data=comp_pdf,
-            file_name=f"{safe_filename(st.session_state.doc_id)}_compliance.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
-        log_usage(
-            action="export_pdf_compliance",
-            user_email=AUTH_EMAIL,
-            doc_id=st.session_state.doc_id,
-            section_id=None,
-            model="",
-            prompt_text="",
-            output_text="",
-            meta={"bytes": len(comp_pdf)},
-        )
-    else:
-        st.caption("Export locked (editor/reviewer/admin only).")
+      with c4:
+          if can("export"):
+              comp_pdf = build_compliance_report_pdf(snap)
+              st.download_button(
+                  "Compliance Report (PDF)",
+                  data=comp_pdf,
+                  file_name=f"{safe_filename(st.session_state.doc_id)}_compliance.pdf",
+                  mime="application/pdf",
+                  use_container_width=True
+              )
+              log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+          else:
+              st.caption("Export locked (editor/reviewer/admin only).")
 
 
 
