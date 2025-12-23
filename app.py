@@ -976,9 +976,6 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
 # ============================================================
 # LLM (rate-limit safe + caps BEFORE calling) + ✅ usage logging
 # ============================================================
-# ============================================================
-# LLM (rate-limit safe + caps BEFORE calling)
-# ============================================================
 def safe_generate(prompt: str, retries: int = LLM_RETRIES):
     delay = 2
     last_err = None
@@ -988,26 +985,69 @@ def safe_generate(prompt: str, retries: int = LLM_RETRIES):
             return client.models.generate_content(
                 model=LLM_MODEL,
                 contents=prompt,
-                config={"temperature": 0.1, "max_output_tokens": 550},
+                config={
+                    "temperature": 0.1,
+                    "max_output_tokens": 550,
+                },
             )
         except Exception as e:
             last_err = repr(e)
             time.sleep(delay)
             delay = min(delay * 2, 30)
 
-    # Surface the failure (Streamlit Cloud sometimes redacts, but logs will show)
     st.error("LLM call failed after retries.")
     st.code(last_err or "Unknown error")
     return None
 
-def convert_chunk(
-    text: str,
-    source_lang: str,
-    doc_id: str,
-    section_id: int,
-    user_email: str
-) -> Dict[str, Any]:
+def _response_text(resp) -> str:
+    """Best-effort extraction of text from google-genai response."""
+    if not resp:
+        return ""
+    t = getattr(resp, "text", None)
+    if isinstance(t, str) and t.strip():
+        return t
+    # fallback: candidates
+    cands = getattr(resp, "candidates", None) or []
+    for c in cands:
+        content = getattr(c, "content", None)
+        parts = getattr(content, "parts", None) or []
+        for p in parts:
+            pt = getattr(p, "text", None)
+            if isinstance(pt, str) and pt.strip():
+                return pt
+    return ""
+
+def _extract_json_object(raw: str) -> Optional[dict]:
+    """Extract the first JSON object from raw, tolerant of ```json fences."""
+    if not raw:
+        return None
+    s = raw.strip()
+
+    # strip markdown fences
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+
+    # find first {...}
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return None
+
+    chunk = m.group(0).strip()
+
+    # remove trailing junk after last brace if needed
+    last = chunk.rfind("}")
+    if last != -1:
+        chunk = chunk[: last + 1]
+
+    try:
+        return json.loads(chunk)
+    except Exception:
+        return None
+
+def convert_chunk(text: str, source_lang: str, doc_id: str, section_id: int, user_email: str) -> Dict[str, Any]:
     capped_text, truncated = truncate_words(text, MAX_CHUNK_WORDS)
+
     best = {
         "en": "",
         "fr": "",
@@ -1018,7 +1058,6 @@ def convert_chunk(
     }
 
     lang_hint = source_lang if source_lang and source_lang != "unknown" else "unknown"
-    extra_rules = ""
     if lang_hint == "fr":
         extra_rules = "- Source text is French. Produce English plain-language translation + French plain-language rewrite.\n"
     elif lang_hint == "en":
@@ -1026,7 +1065,7 @@ def convert_chunk(
     else:
         extra_rules = "- Source text language may be mixed/unknown. Preserve meaning; translate as needed.\n"
 
-    for attempt in range(3):
+    for attempt in range(1, 4):
         prompt = f"""
 Return JSON ONLY: {{ "en": "...", "fr": "..." }}
 
@@ -1041,23 +1080,10 @@ SOURCE_LANG_DETECTED: {lang_hint}
 
 TEXT:
 {capped_text}
-"""
+""".strip()
 
         r = safe_generate(prompt)
-        if not r:
-            log_usage(
-                action="llm_convert_failed",
-                user_email=user_email,
-                doc_id=doc_id,
-                section_id=section_id,
-                model=LLM_MODEL,
-                prompt_text=prompt,
-                output_text="",
-                meta={"attempt": attempt + 1, "reason": "no_response"},
-            )
-            break
-
-        raw_out = getattr(r, "text", "") or ""
+        raw_out = _response_text(r)
 
         log_usage(
             action="llm_convert",
@@ -1067,37 +1093,55 @@ TEXT:
             model=LLM_MODEL,
             prompt_text=prompt,
             output_text=raw_out,
-            meta={"attempt": attempt + 1, "source_lang": lang_hint, "truncated": truncated},
+            meta={"attempt": attempt, "source_lang": lang_hint, "truncated": truncated},
         )
 
-        # ---- JSON extract + parse (NO indentation issues) ----
-        m = re.search(r"\{[\s\S]*\}", raw_out)
-        if not m:
-            st.warning("Model did not return JSON. Showing raw output:")
-            st.code(raw_out[:2000])
-            continue
+        data = _extract_json_object(raw_out)
 
-        try:
-            data = json.loads(m.group(0))
-        except Exception:
-            st.warning("JSON parse failed. Showing extracted JSON chunk + raw output:")
-            st.code(m.group(0)[:2000])
-            st.code(raw_out[:2000])
+        # If no JSON, try again (but don’t silently save blanks)
+        if not isinstance(data, dict):
+            if attempt == 3:
+                st.warning("Model did not return valid JSON. Saving fallback outputs for this section.")
+                # fallback: at least return something usable
+                fallback_en = capped_text.strip()
+                fallback_fr = capped_text.strip()
+                return {
+                    "en": fallback_en,
+                    "fr": fallback_fr,
+                    "grade_en": 99.0,
+                    "grade_fr": 0.0,
+                    "truncated": truncated,
+                    "source_lang": source_lang,
+                }
             continue
 
         en = (data.get("en") or "").strip()
         fr = (data.get("fr") or "").strip()
 
         if not en or not fr:
-            st.warning("JSON received but en/fr were empty. Showing parsed JSON:")
-            st.json(data)
+            if attempt == 3:
+                st.warning("JSON parsed but en/fr empty. Saving fallback outputs for this section.")
+                fallback_en = en or capped_text.strip()
+                fallback_fr = fr or capped_text.strip()
+                return {
+                    "en": fallback_en,
+                    "fr": fallback_fr,
+                    "grade_en": 99.0,
+                    "grade_fr": 0.0,
+                    "truncated": truncated,
+                    "source_lang": source_lang,
+                }
             continue
 
+        # compute readability
         try:
             ge = flesch_kincaid(en)
+        except Exception:
+            ge = 99.0
+        try:
             gf = french_readability(fr)
         except Exception:
-            ge, gf = 99.0, 0.0
+            gf = 0.0
 
         if ge < best["grade_en"]:
             best = {
@@ -1113,6 +1157,7 @@ TEXT:
             return best
 
     return best
+
 
 
 
@@ -1774,6 +1819,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
