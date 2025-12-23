@@ -315,8 +315,9 @@ AUTH_EMAIL = require_login()
 # --- lock role from Secrets ---
 if AUTH_EMAIL:
     st.session_state.auth_role = role_for_email(AUTH_EMAIL)
-    else:
+else:
     st.session_state.auth_role = "viewer"
+
 
 # ------------------------------------------------------------
 # Sidebar: role display / admin override
@@ -1837,6 +1838,7 @@ with right:
               log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
           else:
               st.caption("Export locked (editor/reviewer/admin only).")
+
 
 
 
