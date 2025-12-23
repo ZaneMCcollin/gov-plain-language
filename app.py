@@ -1001,8 +1001,6 @@ def safe_generate(prompt: str, retries: int = LLM_RETRIES):
     st.code(repr(last_exc) if last_exc else "Unknown error")
     return None
 
-    return None
-
 def _response_text(resp) -> str:
     """Aggressive best-effort extraction of text from google-genai response."""
     if resp is None:
@@ -1042,16 +1040,30 @@ def _extract_json_object(raw: str) -> Optional[dict]:
     """Extract the first JSON object from raw, tolerant of ```json fences."""
     if not raw:
         return None
+
     s = raw.strip()
 
-    # strip markdown fences
+    # Strip markdown fences
     if s.startswith("```"):
         s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
         s = re.sub(r"\s*```$", "", s)
 
-    # find first {...}
+    # Find first JSON object
     m = re.search(r"\{[\s\S]*\}", s)
     if not m:
+        return None
+
+    chunk = m.group(0).strip()
+
+    # Trim trailing junk after last brace
+    last = chunk.rfind("}")
+    if last != -1:
+        chunk = chunk[: last + 1]
+
+    try:
+        return json.loads(chunk)
+    except Exception:
+        return None
 
         # fallback: save something visible instead of blanks
     return {
@@ -1076,7 +1088,14 @@ def _extract_json_object(raw: str) -> Optional[dict]:
     except Exception:
         return None
 
-def convert_chunk(text: str, source_lang: str, doc_id: str, section_id: int, user_email: str) -> Dict[str, Any]:
+def convert_chunk(
+    text: str,
+    source_lang: str,
+    doc_id: str,
+    section_id: int,
+    user_email: str,
+) -> Dict[str, Any]:
+
     capped_text, truncated = truncate_words(text, MAX_CHUNK_WORDS)
 
     best = {
@@ -1115,10 +1134,10 @@ TEXT:
 
         r = safe_generate(prompt)
         raw_out = _response_text(r)
-        
+
         if DEBUG_LLM:
-    st.sidebar.markdown("### Last model raw output (truncated)")
-    st.sidebar.code(raw_out[:3000] if raw_out else "(raw_out is empty)")
+            st.sidebar.markdown("### Last model raw output (truncated)")
+            st.sidebar.code(raw_out[:3000] if raw_out else "(raw_out is empty)")
 
         log_usage(
             action="llm_convert",
@@ -1133,16 +1152,13 @@ TEXT:
 
         data = _extract_json_object(raw_out)
 
-        # If no JSON, try again (but don’t silently save blanks)
+        # ❌ No JSON → retry or fallback
         if not isinstance(data, dict):
             if attempt == 3:
-                st.warning("Model did not return valid JSON. Saving fallback outputs for this section.")
-                # fallback: at least return something usable
-                fallback_en = capped_text.strip()
-                fallback_fr = capped_text.strip()
+                st.warning("Model did not return valid JSON. Saving fallback text.")
                 return {
-                    "en": fallback_en,
-                    "fr": fallback_fr,
+                    "en": capped_text.strip(),
+                    "fr": capped_text.strip(),
                     "grade_en": 99.0,
                     "grade_fr": 0.0,
                     "truncated": truncated,
@@ -1153,14 +1169,13 @@ TEXT:
         en = (data.get("en") or "").strip()
         fr = (data.get("fr") or "").strip()
 
+        # ❌ JSON but empty fields
         if not en or not fr:
             if attempt == 3:
-                st.warning("JSON parsed but en/fr empty. Saving fallback outputs for this section.")
-                fallback_en = en or capped_text.strip()
-                fallback_fr = fr or capped_text.strip()
+                st.warning("JSON parsed but en/fr empty. Using fallback.")
                 return {
-                    "en": fallback_en,
-                    "fr": fallback_fr,
+                    "en": en or capped_text.strip(),
+                    "fr": fr or capped_text.strip(),
                     "grade_en": 99.0,
                     "grade_fr": 0.0,
                     "truncated": truncated,
@@ -1168,7 +1183,6 @@ TEXT:
                 }
             continue
 
-        # compute readability
         try:
             ge = flesch_kincaid(en)
         except Exception:
@@ -1192,6 +1206,7 @@ TEXT:
             return best
 
     return best
+
 
 
 
@@ -1854,6 +1869,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
