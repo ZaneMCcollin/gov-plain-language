@@ -49,7 +49,7 @@ from reportlab.lib.units import inch
 
 from collections.abc import Mapping
 from typing import Mapping
-
+from typing import Dict, List
 
 DEBUG_LLM = st.sidebar.toggle("DEBUG LLM (show raw model output)", value=False)
 
@@ -211,35 +211,36 @@ if _is_streamlit_cloud():
 # ============================================================
 
 def _get_allowlists() -> Tuple[List[str], List[str]]:
-    allowed_domains = st.secrets.get("ALLOWED_DOMAINS", "")
-    allowed_emails = st.secrets.get("ALLOWED_EMAILS", "")
-    doms = [d.strip().lower() for d in str(allowed_domains).split(",") if d.strip()]
-    ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
+    doms = [d.strip().lower() for d in str(st.secrets.get("ALLOWED_DOMAINS", "")).split(",") if d.strip()]
+    ems = [e.strip().lower() for e in str(st.secrets.get("ALLOWED_EMAILS", "")).split(",") if e.strip()]
     return doms, ems
 
 
+def _auth_missing_keys() -> List[str]:
+    try:
+        auth = st.secrets.get("auth")
+        if not isinstance(auth, Mapping):
+            return ["[auth]"]
+
+        required = [
+            "redirect_uri",
+            "cookie_secret",
+            "client_id",
+            "client_secret",
+            "server_metadata_url",
+        ]
+        return [f"[auth].{k}" for k in required if not auth.get(k)]
+    except Exception:
+        return ["[auth]"]
 
 
 def _normalize_email_list(x) -> List[str]:
     if not x:
         return []
-    if isinstance(x, str):
-        return [e.strip().lower() for e in x.split(",") if e.strip()]
-    if isinstance(x, (list, tuple)):
-        return [str(e).strip().lower() for e in x if str(e).strip()]
-    return []
+    return [e.strip().lower() for e in str(x).split(",") if e.strip()]
 
 
 def _roles_config() -> Dict[str, List[str]]:
-    """
-    Reads from Secrets:
-
-    [roles]
-    admin = "a@b.com"
-    reviewer = "c@d.com"
-    editor = "e@d.com,f@g.com"
-    viewer = "h@i.com"
-    """
     r = st.secrets.get("roles", {})
     if not isinstance(r, Mapping):
         return {"admin": [], "reviewer": [], "editor": [], "viewer": []}
@@ -253,127 +254,61 @@ def _roles_config() -> Dict[str, List[str]]:
 
 
 def role_for_email(email: str) -> str:
-    email = (email or "").strip().lower()
+    email = (email or "").lower()
     roles = _roles_config()
 
-    # priority order
-    if email and email in roles["admin"]:
+    if email in roles["admin"]:
         return "admin"
-    if email and email in roles["reviewer"]:
+    if email in roles["reviewer"]:
         return "reviewer"
-    if email and email in roles["editor"]:
+    if email in roles["editor"]:
         return "editor"
-    if email and email in roles["viewer"]:
+    if email in roles["viewer"]:
         return "viewer"
-
-    # if roles are configured, anyone not listed becomes viewer
-    # (still allowed to log in if allowlist allowed them)
     return "viewer"
 
 
-def _auth_missing_keys() -> List[str]:
-    """Validate Streamlit auth Secrets for Option A (default provider)."""
-    try:
-        auth = st.secrets.get("auth")
-        if not isinstance(auth, Mapping):
-            return ["[auth]"]
-
-        required = [
-            "redirect_uri",
-            "cookie_secret",
-            "client_id",
-            "client_secret",
-            "server_metadata_url",
-        ]
-
-        missing = []
-        for k in required:
-            v = auth.get(k) if hasattr(auth, "get") else auth[k]
-            if not v:
-                missing.append(f"[auth].{k}")
-        return missing
-
-    except Exception:
-        return ["[auth]"]
-
-
-def _user_email() -> str:
-    try:
-        u = getattr(st, "user", None)
-        if not u:
-            return ""
-        return (getattr(u, "email", "") or "").strip().lower()
-    except Exception:
-        return ""
-
-auth_obj = st.secrets.get("auth", None)
-st.sidebar.write({
-    "secrets_keys": sorted(list(st.secrets.keys())),
-    "auth_type": type(auth_obj).__name__,
-    "auth_keys": sorted(list(auth_obj.keys())) if isinstance(auth_obj, Mapping) else None
-})
-
-
-
 def require_login() -> str:
-    # If Streamlit auth API isn't available (local / older runtime), don't block.
     if not hasattr(st, "login") or not hasattr(st, "user"):
-        st.caption("Auth disabled (local or unsupported runtime).")
         return ""
 
     missing = _auth_missing_keys()
     if missing:
-        st.warning("Auth is not configured correctly in Streamlit Cloud Secrets.")
-        st.caption("Missing:")
-        for k in missing:
-            st.write(f"- {k}")
-        return ""  # don't call st.login() if misconfigured
+        st.error("Auth is not configured correctly in Streamlit Cloud Secrets.")
+        for m in missing:
+            st.write(f"- {m}")
+        st.stop()
 
-    try:
-        email = _user_email()
-        if email:
-            doms, ems = _get_allowlists()
+    email = getattr(st.user, "email", "").lower() if getattr(st, "user", None) else ""
 
-            # Allow rules:
-            # - If ALLOWED_EMAILS is set, email must be in it
-            # - Else if ALLOWED_DOMAINS is set, domain must match
-            # - Else allow anyone who can authenticate
-            if ems:
-                if email in ems:
-                    return email
-            elif doms:
-                if "@" in email and email.split("@", 1)[1] in doms:
-                    return email
-            else:
-                return email
+    if email:
+        doms, ems = _get_allowlists()
 
-            st.error("Access denied: your email is not allowed.")
-            if hasattr(st, "logout"):
-                st.logout()
+        if ems and email not in ems:
+            st.error("Access denied (email not allowed).")
+            st.logout()
             st.stop()
 
-        st.info("Please sign in to continue.")
-        if st.button("Log in"):
-            st.login()  # Option A: default provider
-        st.stop()
+        if doms and email.split("@")[-1] not in doms:
+            st.error("Access denied (domain not allowed).")
+            st.logout()
+            st.stop()
 
-    except Exception as e:
-        st.error("Authentication error.")
-        st.code(repr(e))
-        st.stop()
+        return email
 
-    return ""
+    st.info("Please sign in to continue.")
+    if st.button("Log in"):
+        st.login()
+    st.stop()
 
 
+# --- run auth ---
 AUTH_EMAIL = require_login()
 
+# --- lock role from Secrets ---
 if AUTH_EMAIL:
     st.session_state.auth_role = role_for_email(AUTH_EMAIL)
 
-
-# ------------------------------------------------------------
-# Sidebar: role display / admin override
-# ------------------------------------------------------------
 # ------------------------------------------------------------
 # Sidebar: role display / admin override
 # ------------------------------------------------------------
@@ -399,19 +334,17 @@ if AUTH_EMAIL:
 # ============================================================
 # Auth roles / permissions
 # ============================================================
-PERMS = {
-    "viewer": {"convert": True, "approve": False, "rollback": False, "export": True, "edit_outputs": False, "analytics": False},
-    "editor": {"convert": True, "approve": False, "rollback": False, "export": True, "edit_outputs": True, "analytics": False},
-    "reviewer": {"convert": True, "approve": True, "rollback": False, "export": True, "edit_outputs": True, "analytics": False},
-    "admin": {"convert": True, "approve": True, "rollback": True, "export": True, "edit_outputs": True, "analytics": True},
+
+ROLE_PERMS = {
+    "admin":    {"convert", "export", "approve", "edit_outputs", "rollback", "analytics"},
+    "reviewer": {"export", "approve", "edit_outputs"},
+    "editor":   {"convert", "export", "edit_outputs"},
+    "viewer":   set(),
 }
 
-if "auth_role" not in st.session_state:
-    st.session_state.auth_role = "admin"
-
-
 def can(action: str) -> bool:
-    return bool(PERMS.get(st.session_state.auth_role, {}).get(action, False))
+    role = st.session_state.get("auth_role", "viewer")
+    return action in ROLE_PERMS.get(role, set())
 
 
 # ============================================================
@@ -1524,18 +1457,22 @@ if "page_preview_imgs" not in st.session_state:
 with st.sidebar:
     st.header("Controls")
 
-    st.session_state.auth_role = st.selectbox(
-        "Role",
-        ["viewer", "editor", "reviewer", "admin"],
-        index=["viewer", "editor", "reviewer", "admin"].index(st.session_state.auth_role),
-    )
+    st.caption("Role (locked from Secrets)")
+    st.write(f"**{st.session_state.get('auth_role','viewer')}**")
+
+    if hasattr(st, "logout") and st.button("Logout", use_container_width=True):
+        st.logout()
 
     st.divider()
     st.caption("Storage mode")
     st.success(f"SQLite ✅ ({SQLITE_PATH})")
 
     st.divider()
-    doc_id_in = st.text_input("Document ID", value=st.session_state.doc_id, placeholder="e.g., client-abc-001")
+    doc_id_in = st.text_input(
+        "Document ID",
+        value=st.session_state.doc_id,
+        placeholder="e.g., client-abc-001"
+    )
 
     # ✅ FIX: changing document id should not lock extraction cache
     if doc_id_in != st.session_state.doc_id:
@@ -1544,6 +1481,7 @@ with st.sidebar:
         st.session_state.last_extract_key = ""  # ✅ IMPORTANT
 
     c1, c2 = st.columns(2)
+
     with c1:
         if st.button("Load latest", use_container_width=True):
             if st.session_state.doc_id:
@@ -1596,7 +1534,11 @@ with st.sidebar:
         summ = analytics_summary(days=days)
         st.caption(f"Since: {summ['since_iso']}")
         st.write(f"Events: **{summ['total_events']}**")
-        st.write(f"Tokens (in/out): **{summ['tokens_in']} / {summ['tokens_out']}**  | Total: **{summ['tokens_total']}**")
+        st.write(
+            f"Tokens (in/out): **{summ['tokens_in']} / {summ['tokens_out']}**  | "
+            f"Total: **{summ['tokens_total']}**"
+        )
+
         if BILLING_RATE_PER_1K > 0:
             st.write(f"Estimated cost (@ {BILLING_RATE_PER_1K}/1K): **{summ['estimated_cost']}**")
         else:
@@ -1615,6 +1557,7 @@ with st.sidebar:
             mime="text/csv",
             use_container_width=True
         )
+
 
 
 # ============================================================
@@ -1694,11 +1637,10 @@ with left:
         for i, img in enumerate(st.session_state.page_preview_imgs, start=1):
             st.image(img, caption=f"Page {i}", use_container_width=True)
 
-    user_text = st.text_area("Input text", height=320, key="input_text")
-    st.caption(f"Chars: {len(user_text)} | Words: {word_count(user_text)}")
+     user_text = st.text_area("Input text", height=320, key="input_text")
 
-    with st.expander("Extraction diagnostics"):
-        st.write(meta)
+ if not can("convert"):
+    st.info("You don’t have permission to convert. Ask an admin to grant editor/admin role.")
 
     convert_disabled = (not can("convert")) or (not st.session_state.doc_id) or (not user_text.strip())
     convert_btn = st.button("Convert & Save Version", type="primary", disabled=convert_disabled)
@@ -1800,24 +1742,24 @@ with right:
                 st.markdown("### Français")
                 st.write(s.get("fr", ""))
 
-            if can("approve"):
-                s["reviewer"] = st.text_input("Reviewer name", value=s.get("reviewer", ""), key=f"rev_{s['id']}")
-                s["comment"] = st.text_area("Reviewer comment", value=s.get("comment", ""), key=f"com_{s['id']}", height=90)
+         if can("approve"):
+    s["reviewer"] = st.text_input("Reviewer name", value=s.get("reviewer", ""), key=f"rev_{s['id']}")
+    s["comment"] = st.text_area("Reviewer comment", value=s.get("comment", ""), key=f"com_{s['id']}", height=90)
 
-                status_options = ["draft", "reviewed", "approved"]
-                s["status"] = st.selectbox(
-                    "Status",
-                    status_options,
-                    index=status_options.index(s.get("status", "draft")),
-                    key=f"stat_{s['id']}"
-                )
+    status_options = ["draft", "reviewed", "approved"]
+    s["status"] = st.selectbox(
+        "Status",
+        status_options,
+        index=status_options.index(s.get("status", "draft")),
+        key=f"stat_{s['id']}"
+    )
 
-                if s["status"] == "approved" and not s.get("approved_at"):
-                    s["approved_at"] = now_iso()
-                if s["status"] != "approved":
-                    s["approved_at"] = ""
-
-            st.divider()
+    if s["status"] == "approved" and not s.get("approved_at"):
+        s["approved_at"] = now_iso()
+    if s["status"] != "approved":
+        s["approved_at"] = ""
+else:
+    st.caption("Approval locked (reviewer/admin only).")
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -1838,41 +1780,76 @@ with right:
 
                 st.success("Saved updated version ✅")
 
-        with c2:
-            if can("export"):
-                docx_bytes = build_docx(snap)
-                st.download_button(
-                    "Download DOCX",
-                    data=docx_bytes,
-                    file_name=f"{safe_filename(st.session_state.doc_id)}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True
-                )
-                log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(docx_bytes)})
+    with c2:
+    if can("export"):
+        docx_bytes = build_docx(snap)
+        st.download_button(
+            "Download DOCX",
+            data=docx_bytes,
+            file_name=f"{safe_filename(st.session_state.doc_id)}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
+        log_usage(
+            action="export_docx",
+            user_email=AUTH_EMAIL,
+            doc_id=st.session_state.doc_id,
+            section_id=None,
+            model="",
+            prompt_text="",
+            output_text="",
+            meta={"bytes": len(docx_bytes)},
+        )
+    else:
+        st.caption("Export locked (editor/reviewer/admin only).")
 
-        with c3:
-            if can("export"):
-                pdf_bytes = build_pdf(snap)
-                st.download_button(
-                    "Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"{safe_filename(st.session_state.doc_id)}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-                log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(pdf_bytes)})
+with c3:
+    if can("export"):
+        pdf_bytes = build_pdf(snap)
+        st.download_button(
+            "Download PDF",
+            data=pdf_bytes,
+            file_name=f"{safe_filename(st.session_state.doc_id)}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+        log_usage(
+            action="export_pdf_full",
+            user_email=AUTH_EMAIL,
+            doc_id=st.session_state.doc_id,
+            section_id=None,
+            model="",
+            prompt_text="",
+            output_text="",
+            meta={"bytes": len(pdf_bytes)},
+        )
+    else:
+        st.caption("Export locked (editor/reviewer/admin only).")
 
-        with c4:
-            if can("export"):
-                comp_pdf = build_compliance_report_pdf(snap)
-                st.download_button(
-                    "Compliance Report (PDF)",
-                    data=comp_pdf,
-                    file_name=f"{safe_filename(st.session_state.doc_id)}_compliance.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-                log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+with c4:
+    if can("export"):
+        comp_pdf = build_compliance_report_pdf(snap)
+        st.download_button(
+            "Compliance Report (PDF)",
+            data=comp_pdf,
+            file_name=f"{safe_filename(st.session_state.doc_id)}_compliance.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+        log_usage(
+            action="export_pdf_compliance",
+            user_email=AUTH_EMAIL,
+            doc_id=st.session_state.doc_id,
+            section_id=None,
+            model="",
+            prompt_text="",
+            output_text="",
+            meta={"bytes": len(comp_pdf)},
+        )
+    else:
+        st.caption("Export locked (editor/reviewer/admin only).")
+
+
 
 
 
