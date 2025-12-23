@@ -1052,10 +1052,8 @@ def _extract_json_object(raw: str) -> Optional[dict]:
     # find first {...}
     m = re.search(r"\{[\s\S]*\}", s)
     if not m:
- return None
 
-
- # fallback: save something visible instead of blanks
+        # fallback: save something visible instead of blanks
     return {
         "en": capped_text.strip(),
         "fr": capped_text.strip(),
@@ -1856,6 +1854,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
