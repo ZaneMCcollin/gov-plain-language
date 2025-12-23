@@ -269,26 +269,45 @@ def role_for_email(email: str) -> str:
 
 
 def require_login() -> str:
-  doms, ems = _get_allowlists()
+    if not hasattr(st, "login") or not hasattr(st, "user"):
+        return ""
 
-# If either allowlist is set, enforce it
-if ems or doms:
-    allowed = False
-
-    if ems and email in ems:
-        allowed = True
-
-    if (not allowed) and doms and "@" in email:
-        if email.split("@", 1)[1] in doms:
-            allowed = True
-
-    if not allowed:
-        st.error(f"Access denied: {email} is not allowed.")
-        if hasattr(st, "logout"):
-            st.logout()
+    missing = _auth_missing_keys()
+    if missing:
+        st.error("Auth is not configured correctly in Streamlit Cloud Secrets.")
+        for m in missing:
+            st.write(f"- {m}")
         st.stop()
 
-return email
+    email = getattr(st.user, "email", "").strip().lower() if getattr(st, "user", None) else ""
+
+    if email:
+        doms, ems = _get_allowlists()
+
+        # allow if email OR domain matches (when any allowlist is set)
+        if ems or doms:
+            allowed = False
+
+            if ems and email in ems:
+                allowed = True
+
+            if (not allowed) and doms and "@" in email:
+                if email.split("@", 1)[1] in doms:
+                    allowed = True
+
+            if not allowed:
+                st.error(f"Access denied: {email} is not allowed.")
+                if hasattr(st, "logout"):
+                    st.logout()
+                st.stop()
+
+        return email   # ✅ INSIDE FUNCTION
+
+    st.info("Please sign in to continue.")
+    if st.button("Log in"):
+        st.login()
+    st.stop()
+
 
 # --- run auth ---
 AUTH_EMAIL = require_login()
@@ -1811,6 +1830,7 @@ with right:
               log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
           else:
               st.caption("Export locked (editor/reviewer/admin only).")
+
 
 
 
