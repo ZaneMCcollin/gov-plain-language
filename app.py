@@ -976,30 +976,22 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
 # ============================================================
 # LLM (rate-limit safe + caps BEFORE calling) + ✅ usage logging
 # ============================================================
-def safe_generate(prompt: str, retries: int = LLM_RETRIES):
-    delay = 2
-    last_err = None
-    for _ in range(retries):
-        try:
-            r = client.models.generate_content(
-                model=LLM_MODEL,
-                contents=prompt,
-                config={"temperature": 0.1, "max_output_tokens": 550},
-            )
-            return r
-        except Exception as e:  # catch ALL
-            last_err = repr(e)
-            time.sleep(delay)
-            delay = min(delay * 2, 30)
-
-    # IMPORTANT: surface the failure
-    st.error("LLM call failed after retries.")
-    st.code(last_err or "Unknown error")
-    return None
-
-def convert_chunk(text: str, source_lang: str, doc_id: str, section_id: int, user_email: str) -> Dict[str, Any]:
+def convert_chunk(
+    text: str,
+    source_lang: str,
+    doc_id: str,
+    section_id: int,
+    user_email: str
+) -> Dict[str, Any]:
     capped_text, truncated = truncate_words(text, MAX_CHUNK_WORDS)
-    best = {"en": "", "fr": "", "grade_en": 99.0, "grade_fr": 0.0, "truncated": truncated, "source_lang": source_lang}
+    best = {
+        "en": "",
+        "fr": "",
+        "grade_en": 99.0,
+        "grade_fr": 0.0,
+        "truncated": truncated,
+        "source_lang": source_lang,
+    }
 
     lang_hint = source_lang if source_lang and source_lang != "unknown" else "unknown"
     extra_rules = ""
@@ -1026,9 +1018,9 @@ SOURCE_LANG_DETECTED: {lang_hint}
 TEXT:
 {capped_text}
 """
+
         r = safe_generate(prompt)
         if not r:
-            # log failed attempt
             log_usage(
                 action="llm_convert_failed",
                 user_email=user_email,
@@ -1042,7 +1034,7 @@ TEXT:
             break
 
         raw_out = getattr(r, "text", "") or ""
-        # log raw usage for billing/analytics (input prompt + raw output)
+
         log_usage(
             action="llm_convert",
             user_email=user_email,
@@ -1054,43 +1046,50 @@ TEXT:
             meta={"attempt": attempt + 1, "source_lang": lang_hint, "truncated": truncated},
         )
 
-        try:
-          # Try to extract JSON safely
-m = re.search(r"\{[\s\S]*\}", raw_out)
-if not m:
-    # show raw output so you can see what Gemini returned
-    st.warning("Model did not return JSON. Showing raw output:")
-    st.code(raw_out[:2000])
-    continue
-
-try:
-    data = json.loads(m.group(0))
-except Exception:
-    st.warning("JSON parse failed. Showing extracted JSON chunk + raw output:")
-    st.code(m.group(0)[:2000])
-    st.code(raw_out[:2000])
-    continue
-
-            en = (data.get("en") or "").strip()
-            fr = (data.get("fr") or "").strip()
-         if not en or not fr:
-    st.warning("JSON received but en/fr were empty. Showing parsed JSON:")
-    st.json(data)
-    continue
-
-
-            ge = flesch_kincaid(en)
-            gf = french_readability(fr)
-
-            if ge < best["grade_en"]:
-                best = {"en": en, "fr": fr, "grade_en": ge, "grade_fr": gf, "truncated": truncated, "source_lang": source_lang}
-
-            if ge <= 8:
-                return best
-        except Exception:
+        # ---- JSON extract + parse (NO indentation issues) ----
+        m = re.search(r"\{[\s\S]*\}", raw_out)
+        if not m:
+            st.warning("Model did not return JSON. Showing raw output:")
+            st.code(raw_out[:2000])
             continue
 
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            st.warning("JSON parse failed. Showing extracted JSON chunk + raw output:")
+            st.code(m.group(0)[:2000])
+            st.code(raw_out[:2000])
+            continue
+
+        en = (data.get("en") or "").strip()
+        fr = (data.get("fr") or "").strip()
+
+        if not en or not fr:
+            st.warning("JSON received but en/fr were empty. Showing parsed JSON:")
+            st.json(data)
+            continue
+
+        try:
+            ge = flesch_kincaid(en)
+            gf = french_readability(fr)
+        except Exception:
+            ge, gf = 99.0, 0.0
+
+        if ge < best["grade_en"]:
+            best = {
+                "en": en,
+                "fr": fr,
+                "grade_en": ge,
+                "grade_fr": gf,
+                "truncated": truncated,
+                "source_lang": source_lang,
+            }
+
+        if ge <= 8:
+            return best
+
     return best
+
 
 
 # ============================================================
@@ -1751,6 +1750,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
