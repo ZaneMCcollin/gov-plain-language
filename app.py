@@ -428,6 +428,36 @@ client = genai.Client(api_key=api_key)
 # ============================================================
 # Helpers
 # ============================================================
+
+def flesch_kincaid(text: str) -> float:
+    if not text or len(text.strip()) < 30:
+        return 99.0
+
+    sentences = max(1, len(re.findall(r"[.!?]+", text)))
+    words = max(1, len(re.findall(r"\b\w+\b", text)))
+    syllables = sum(_count_syllables(w) for w in re.findall(r"\b\w+\b", text))
+
+    try:
+        grade = 0.39 * (words / sentences) + 11.8 * (syllables / words) - 15.59
+        return round(max(0.0, grade), 1)
+    except Exception:
+        return 99.0
+
+
+def _count_syllables(word: str) -> int:
+    word = word.lower()
+    vowels = "aeiouy"
+    count = 0
+    prev = False
+    for c in word:
+        is_vowel = c in vowels
+        if is_vowel and not prev:
+            count += 1
+        prev = is_vowel
+    if word.endswith("e"):
+        count = max(1, count - 1)
+    return max(1, count)
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1843,6 +1873,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
