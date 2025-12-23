@@ -50,6 +50,7 @@ from reportlab.lib.units import inch
 from collections.abc import Mapping
 
 
+DEBUG_LLM = st.sidebar.toggle("DEBUG LLM (show raw model output)", value=False)
 
 
 # ============================================================
@@ -978,45 +979,65 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
 # ============================================================
 def safe_generate(prompt: str, retries: int = LLM_RETRIES):
     delay = 2
-    last_err = None
+    last_exc = None
 
-    for _ in range(retries):
+    for attempt in range(1, retries + 1):
         try:
             return client.models.generate_content(
                 model=LLM_MODEL,
                 contents=prompt,
-                config={
-                    "temperature": 0.1,
-                    "max_output_tokens": 550,
-                },
+                config={"temperature": 0.1, "max_output_tokens": 550},
             )
         except Exception as e:
-            last_err = repr(e)
+            last_exc = e
+            if DEBUG_LLM:
+                st.sidebar.error(f"LLM error attempt {attempt}/{retries}")
+                st.sidebar.code(repr(e))
             time.sleep(delay)
             delay = min(delay * 2, 30)
 
+    # Always show the final error (even if DEBUG off)
     st.error("LLM call failed after retries.")
-    st.code(last_err or "Unknown error")
+    st.code(repr(last_exc) if last_exc else "Unknown error")
+    return None
+
     return None
 
 def _response_text(resp) -> str:
-    """Best-effort extraction of text from google-genai response."""
-    if not resp:
+    """Aggressive best-effort extraction of text from google-genai response."""
+    if resp is None:
         return ""
+
+    # 1) Normal path
     t = getattr(resp, "text", None)
     if isinstance(t, str) and t.strip():
-        return t
-    # fallback: candidates
-    cands = getattr(resp, "candidates", None) or []
-    for c in cands:
-        content = getattr(c, "content", None)
-        parts = getattr(content, "parts", None) or []
-        for p in parts:
-            pt = getattr(p, "text", None)
-            if isinstance(pt, str) and pt.strip():
-                return pt
-    return ""
+        return t.strip()
 
+    # 2) Candidates path
+    cands = getattr(resp, "candidates", None)
+    if cands:
+        for c in cands:
+            content = getattr(c, "content", None)
+            parts = getattr(content, "parts", None) or []
+            for p in parts:
+                pt = getattr(p, "text", None)
+                if isinstance(pt, str) and pt.strip():
+                    return pt.strip()
+
+    # 3) Some versions store output deeper
+    try:
+        d = resp.__dict__
+        for k in ("output_text", "result", "response", "data"):
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    except Exception:
+        pass
+
+    # 4) LAST resort: stringify the whole object so you can see *something*
+    s = str(resp)
+    return s.strip() if isinstance(s, str) else ""
+    
 def _extract_json_object(raw: str) -> Optional[dict]:
     """Extract the first JSON object from raw, tolerant of ```json fences."""
     if not raw:
@@ -1031,7 +1052,17 @@ def _extract_json_object(raw: str) -> Optional[dict]:
     # find first {...}
     m = re.search(r"\{[\s\S]*\}", s)
     if not m:
-        return None
+        
+ # fallback: save something visible instead of blanks
+    return {
+        "en": capped_text.strip(),
+        "fr": capped_text.strip(),
+        "grade_en": 99.0,
+        "grade_fr": 0.0,
+        "truncated": truncated,
+        "source_lang": source_lang,
+    }
+ return None
 
     chunk = m.group(0).strip()
 
@@ -1084,6 +1115,10 @@ TEXT:
 
         r = safe_generate(prompt)
         raw_out = _response_text(r)
+        
+        if DEBUG_LLM:
+    st.sidebar.markdown("### Last model raw output (truncated)")
+    st.sidebar.code(raw_out[:3000] if raw_out else "(raw_out is empty)")
 
         log_usage(
             action="llm_convert",
@@ -1819,6 +1854,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
