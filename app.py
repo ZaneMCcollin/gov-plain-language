@@ -1,4 +1,4 @@
-# ============================================================
+  # ============================================================
 # GovCan Plain Language Converter — ONE-FILE ENTERPRISE BUILD
 # (Cloud Run + SQLite + Reviewer workflow + Versioning + DOCX/PDF + OCR + Limits + Lang detect + OCR confidence)
 #
@@ -352,14 +352,13 @@ ROLE_PERMS = {
     "viewer":   set(),
 }
 
-if "auth_role" not in st.session_state:
-    return False
-
 def can(action: str) -> bool:
     if "auth_role" not in st.session_state:
         return False
-    return action in ROLE_PERMS.get(st.session_state.auth_role, set())
-
+    return action in ROLE_PERMS.get(
+        st.session_state.get("auth_role", "viewer"),
+        set()
+    )
 
 
 # ============================================================
@@ -1838,6 +1837,7 @@ with right:
               log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
           else:
               st.caption("Export locked (editor/reviewer/admin only).")
+
 
 
 
