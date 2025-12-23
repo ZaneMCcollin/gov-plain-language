@@ -48,6 +48,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 
 from collections.abc import Mapping
+from typing import Mapping
 
 
 DEBUG_LLM = st.sidebar.toggle("DEBUG LLM (show raw model output)", value=False)
@@ -217,12 +218,14 @@ def _get_allowlists() -> Tuple[List[str], List[str]]:
     return doms, ems
 
 
+
+
 def _normalize_email_list(x) -> List[str]:
     if not x:
         return []
     if isinstance(x, str):
         return [e.strip().lower() for e in x.split(",") if e.strip()]
-    if isinstance(x, list) or isinstance(x, tuple):
+    if isinstance(x, (list, tuple)):
         return [str(e).strip().lower() for e in x if str(e).strip()]
     return []
 
@@ -232,10 +235,10 @@ def _roles_config() -> Dict[str, List[str]]:
     Reads from Secrets:
 
     [roles]
-    admin = ["a@b.com"]
-    reviewer = ["c@d.com"]
-    editor = []
-    viewer = []
+    admin = "a@b.com"
+    reviewer = "c@d.com"
+    editor = "e@d.com,f@g.com"
+    viewer = "h@i.com"
     """
     r = st.secrets.get("roles", {})
     if not isinstance(r, Mapping):
@@ -263,7 +266,8 @@ def role_for_email(email: str) -> str:
     if email and email in roles["viewer"]:
         return "viewer"
 
-    # default fallback if not listed
+    # if roles are configured, anyone not listed becomes viewer
+    # (still allowed to log in if allowlist allowed them)
     return "viewer"
 
 
@@ -373,19 +377,15 @@ if AUTH_EMAIL:
 if AUTH_EMAIL:
     locked_role = st.session_state.get("auth_role", "viewer")
 
-    with st.sidebar:
-        st.header("Controls")
-
-        if locked_role == "admin":
-            st.session_state.auth_role = st.selectbox(
-                "Role (admin can override for testing)",
-                ["viewer", "editor", "reviewer", "admin"],
-                index=["viewer", "editor", "reviewer", "admin"].index(locked_role),
-            )
-        else:
-            st.caption("Role (locked)")
-            st.write(f"**{locked_role}**")
-
+   if locked_role == "admin":
+    st.session_state.auth_role = st.selectbox(
+        "Role (admin can override for testing)",
+        ["viewer", "editor", "reviewer", "admin"],
+        index=["viewer", "editor", "reviewer", "admin"].index(locked_role),
+    )
+else:
+    st.caption("Role (locked)")
+    st.write(f"**{locked_role}**")
         if hasattr(st, "logout"):
             if st.button("Logout", use_container_width=True):
                 st.logout()
@@ -1869,6 +1869,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
