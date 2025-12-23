@@ -976,6 +976,30 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
 # ============================================================
 # LLM (rate-limit safe + caps BEFORE calling) + ✅ usage logging
 # ============================================================
+# ============================================================
+# LLM (rate-limit safe + caps BEFORE calling)
+# ============================================================
+def safe_generate(prompt: str, retries: int = LLM_RETRIES):
+    delay = 2
+    last_err = None
+
+    for _ in range(retries):
+        try:
+            return client.models.generate_content(
+                model=LLM_MODEL,
+                contents=prompt,
+                config={"temperature": 0.1, "max_output_tokens": 550},
+            )
+        except Exception as e:
+            last_err = repr(e)
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+
+    # Surface the failure (Streamlit Cloud sometimes redacts, but logs will show)
+    st.error("LLM call failed after retries.")
+    st.code(last_err or "Unknown error")
+    return None
+
 def convert_chunk(
     text: str,
     source_lang: str,
@@ -1750,6 +1774,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
