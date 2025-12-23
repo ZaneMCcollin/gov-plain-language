@@ -978,16 +978,23 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
 # ============================================================
 def safe_generate(prompt: str, retries: int = LLM_RETRIES):
     delay = 2
+    last_err = None
     for _ in range(retries):
         try:
-            return client.models.generate_content(
+            r = client.models.generate_content(
                 model=LLM_MODEL,
                 contents=prompt,
                 config={"temperature": 0.1, "max_output_tokens": 550},
             )
-        except ClientError:
+            return r
+        except Exception as e:  # catch ALL
+            last_err = repr(e)
             time.sleep(delay)
             delay = min(delay * 2, 30)
+
+    # IMPORTANT: surface the failure
+    st.error("LLM call failed after retries.")
+    st.code(last_err or "Unknown error")
     return None
 
 def convert_chunk(text: str, source_lang: str, doc_id: str, section_id: int, user_email: str) -> Dict[str, Any]:
@@ -1048,14 +1055,29 @@ TEXT:
         )
 
         try:
-            m = re.search(r"\{.*\}", raw_out, re.S)
-            if not m:
-                continue
-            data = json.loads(m.group())
+          # Try to extract JSON safely
+m = re.search(r"\{[\s\S]*\}", raw_out)
+if not m:
+    # show raw output so you can see what Gemini returned
+    st.warning("Model did not return JSON. Showing raw output:")
+    st.code(raw_out[:2000])
+    continue
+
+try:
+    data = json.loads(m.group(0))
+except Exception:
+    st.warning("JSON parse failed. Showing extracted JSON chunk + raw output:")
+    st.code(m.group(0)[:2000])
+    st.code(raw_out[:2000])
+    continue
+
             en = (data.get("en") or "").strip()
             fr = (data.get("fr") or "").strip()
-            if not en or not fr:
-                continue
+         if not en or not fr:
+    st.warning("JSON received but en/fr were empty. Showing parsed JSON:")
+    st.json(data)
+    continue
+
 
             ge = flesch_kincaid(en)
             gf = french_readability(fr)
@@ -1729,6 +1751,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
