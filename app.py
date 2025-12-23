@@ -1039,25 +1039,20 @@ def _response_text(resp) -> str:
     return s.strip() if isinstance(s, str) else ""
     
 def _extract_json_object(raw: str) -> Optional[dict]:
-    """Extract the first JSON object from raw, tolerant of ```json fences."""
     if not raw:
         return None
 
     s = raw.strip()
 
-    # Strip markdown fences
     if s.startswith("```"):
         s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
         s = re.sub(r"\s*```$", "", s)
 
-    # Find first JSON object
     m = re.search(r"\{[\s\S]*\}", s)
     if not m:
         return None
 
     chunk = m.group(0).strip()
-
-    # Trim trailing junk after last brace
     last = chunk.rfind("}")
     if last != -1:
         chunk = chunk[: last + 1]
@@ -1090,14 +1085,7 @@ def _extract_json_object(raw: str) -> Optional[dict]:
     except Exception:
         return None
 
-def convert_chunk(
-    text: str,
-    source_lang: str,
-    doc_id: str,
-    section_id: int,
-    user_email: str,
-) -> Dict[str, Any]:
-
+def convert_chunk(text: str, source_lang: str, doc_id: str, section_id: int, user_email: str) -> Dict[str, Any]:
     capped_text, truncated = truncate_words(text, MAX_CHUNK_WORDS)
 
     best = {
@@ -1137,10 +1125,6 @@ TEXT:
         r = safe_generate(prompt)
         raw_out = _response_text(r)
 
-        if DEBUG_LLM:
-            st.sidebar.markdown("### Last model raw output (truncated)")
-            st.sidebar.code(raw_out[:3000] if raw_out else "(raw_out is empty)")
-
         log_usage(
             action="llm_convert",
             user_email=user_email,
@@ -1153,61 +1137,49 @@ TEXT:
         )
 
         data = _extract_json_object(raw_out)
-
-        # ❌ No JSON → retry or fallback
         if not isinstance(data, dict):
-            if attempt == 3:
-                st.warning("Model did not return valid JSON. Saving fallback text.")
-                return {
-                    "en": capped_text.strip(),
-                    "fr": capped_text.strip(),
-                    "grade_en": 99.0,
-                    "grade_fr": 0.0,
-                    "truncated": truncated,
-                    "source_lang": source_lang,
-                }
             continue
 
         en = (data.get("en") or "").strip()
         fr = (data.get("fr") or "").strip()
 
-        # ❌ JSON but empty fields
-        if not en or not fr:
-            if attempt == 3:
-                st.warning("JSON parsed but en/fr empty. Using fallback.")
-                return {
-                    "en": en or capped_text.strip(),
-                    "fr": fr or capped_text.strip(),
-                    "grade_en": 99.0,
-                    "grade_fr": 0.0,
+        # ✅ If model gave text, KEEP IT no matter what readability does
+        if en and fr:
+            # Compute readability, but don't let it wipe outputs
+            try:
+                ge = float(flesch_kincaid(en))
+            except Exception:
+                ge = 99.0
+            try:
+                gf = float(french_readability(fr))
+            except Exception:
+                gf = 0.0
+
+            # ✅ Update best even if ge=99, as long as best is empty OR grade improved
+            if (not best["en"]) or (ge < best["grade_en"]):
+                best = {
+                    "en": en,
+                    "fr": fr,
+                    "grade_en": ge,
+                    "grade_fr": gf,
                     "truncated": truncated,
                     "source_lang": source_lang,
                 }
-            continue
 
-        try:
-            ge = flesch_kincaid(en)
-        except Exception:
-            ge = 99.0
-        try:
-            gf = french_readability(fr)
-        except Exception:
-            gf = 0.0
+            if ge <= 8:
+                return best
 
-        if ge < best["grade_en"]:
-            best = {
-                "en": en,
-                "fr": fr,
-                "grade_en": ge,
-                "grade_fr": gf,
-                "truncated": truncated,
-                "source_lang": source_lang,
-            }
+        # If JSON exists but one side missing, try again
+        continue
 
-        if ge <= 8:
-            return best
+    # ✅ FINAL SAFETY: never return blank outputs
+    if not best["en"] or not best["fr"]:
+        fallback = capped_text.strip()
+        best["en"] = best["en"] or fallback
+        best["fr"] = best["fr"] or fallback
 
     return best
+
 
 
 
@@ -1871,6 +1843,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
