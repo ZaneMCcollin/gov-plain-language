@@ -1,4 +1,4 @@
-  # ============================================================
+# ============================================================
 # GovCan Plain Language Converter — ONE-FILE ENTERPRISE BUILD
 # (Cloud Run + SQLite + Reviewer workflow + Versioning + DOCX/PDF + OCR + Limits + Lang detect + OCR confidence)
 #
@@ -46,12 +46,6 @@ from PIL import Image  # noqa: F401
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
-
-from collections.abc import Mapping
-from typing import Mapping
-from typing import Dict, List
-
-DEBUG_LLM = st.sidebar.toggle("DEBUG LLM (show raw model output)", value=False)
 
 
 # ============================================================
@@ -204,43 +198,41 @@ if _is_streamlit_cloud():
 
 
 # ============================================================
-# ✅ Authentication (Option A: default provider)
-# - Uses Streamlit built-in login (st.login / st.user)
-# - Validates Option A Secrets shape: everything inside [auth]
-# - Optional allowlists via ALLOWED_DOMAINS / ALLOWED_EMAILS (comma-separated)
+# ============================================================
+# ✅ Authentication + Allow-lists + Locked roles (from Secrets)
 # ============================================================
 
+from collections.abc import Mapping
+
 def _get_allowlists() -> Tuple[List[str], List[str]]:
-    doms = [d.strip().lower() for d in str(st.secrets.get("ALLOWED_DOMAINS", "")).split(",") if d.strip()]
-    ems = [e.strip().lower() for e in str(st.secrets.get("ALLOWED_EMAILS", "")).split(",") if e.strip()]
+    """Read allow-lists from Secrets (comma-separated strings)."""
+    allowed_domains = st.secrets.get("ALLOWED_DOMAINS", "")
+    allowed_emails = st.secrets.get("ALLOWED_EMAILS", "")
+    doms = [d.strip().lower() for d in str(allowed_domains).split(",") if d.strip()]
+    ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
     return doms, ems
-
-
-def _auth_missing_keys() -> List[str]:
-    try:
-        auth = st.secrets.get("auth")
-        if not isinstance(auth, Mapping):
-            return ["[auth]"]
-
-        required = [
-            "redirect_uri",
-            "cookie_secret",
-            "client_id",
-            "client_secret",
-            "server_metadata_url",
-        ]
-        return [f"[auth].{k}" for k in required if not auth.get(k)]
-    except Exception:
-        return ["[auth]"]
 
 
 def _normalize_email_list(x) -> List[str]:
     if not x:
         return []
-    return [e.strip().lower() for e in str(x).split(",") if e.strip()]
+    if isinstance(x, str):
+        return [e.strip().lower() for e in x.split(",") if e.strip()]
+    if isinstance(x, (list, tuple)):
+        return [str(e).strip().lower() for e in x if str(e).strip()]
+    return []
 
 
 def _roles_config() -> Dict[str, List[str]]:
+    """
+    Reads from Secrets:
+
+    [roles]
+    admin = "a@b.com"
+    reviewer = "c@d.com"
+    editor = "e@d.com,f@g.com"
+    viewer = "h@i.com"
+    """
     r = st.secrets.get("roles", {})
     if not isinstance(r, Mapping):
         return {"admin": [], "reviewer": [], "editor": [], "viewer": []}
@@ -254,92 +246,120 @@ def _roles_config() -> Dict[str, List[str]]:
 
 
 def role_for_email(email: str) -> str:
-    email = (email or "").lower()
+    email = (email or "").strip().lower()
     roles = _roles_config()
 
-    if email in roles["admin"]:
+    # priority order
+    if email and email in roles["admin"]:
         return "admin"
-    if email in roles["reviewer"]:
+    if email and email in roles["reviewer"]:
         return "reviewer"
-    if email in roles["editor"]:
+    if email and email in roles["editor"]:
         return "editor"
-    if email in roles["viewer"]:
+    if email and email in roles["viewer"]:
         return "viewer"
-    return "viewer"
+
+    return "viewer"  # default if not listed
+
+
+def _auth_missing_keys() -> List[str]:
+    """Validate Streamlit auth Secrets for Option A (default provider)."""
+    try:
+        auth = st.secrets.get("auth")
+        if not isinstance(auth, Mapping):
+            return ["[auth]"]
+
+        required = [
+            "redirect_uri",
+            "cookie_secret",
+            "client_id",
+            "client_secret",
+            "server_metadata_url",
+        ]
+
+        missing = []
+        for k in required:
+            v = auth.get(k) if hasattr(auth, "get") else auth[k]
+            if not v:
+                missing.append(f"[auth].{k}")
+        return missing
+    except Exception:
+        return ["[auth]"]
+
+
+def _user_email() -> str:
+    try:
+        u = getattr(st, "user", None)
+        if not u:
+            return ""
+        return (getattr(u, "email", "") or "").strip().lower()
+    except Exception:
+        return ""
 
 
 def require_login() -> str:
+    # If Streamlit auth API isn't available (local / older runtime), don't block.
     if not hasattr(st, "login") or not hasattr(st, "user"):
+        st.caption("Auth disabled (local or unsupported runtime).")
         return ""
 
     missing = _auth_missing_keys()
     if missing:
-        st.error("Auth is not configured correctly in Streamlit Cloud Secrets.")
-        for m in missing:
-            st.write(f"- {m}")
+        st.warning("Auth is not configured correctly in Streamlit Cloud Secrets.")
+        st.caption("Missing:")
+        for k in missing:
+            st.write(f"- {k}")
+        return ""  # don't call st.login() if misconfigured
+
+    try:
+        email = _user_email()
+        if email:
+            doms, ems = _get_allowlists()
+
+            # Allow rules:
+            # - If both lists are set: allow if (email in ALLOWED_EMAILS) OR (domain in ALLOWED_DOMAINS)
+            # - If only ALLOWED_EMAILS: must match
+            # - Else if only ALLOWED_DOMAINS: domain must match
+            # - Else: allow anyone who can authenticate
+            domain_ok = ("@" in email and email.split("@", 1)[1] in doms) if doms else False
+            email_ok = (email in ems) if ems else False
+
+            if ems and doms:
+                if email_ok or domain_ok:
+                    return email
+            elif ems:
+                if email_ok:
+                    return email
+            elif doms:
+                if domain_ok:
+                    return email
+            else:
+                return email
+
+            st.error("Access denied: your account is not on the allow-list.")
+            if hasattr(st, "logout"):
+                st.logout()
+            st.stop()
+
+        st.info("Please sign in to continue.")
+        if st.button("Log in", use_container_width=True):
+            st.login()  # Option A: default provider
         st.stop()
 
-    email = getattr(st.user, "email", "").strip().lower() if getattr(st, "user", None) else ""
+    except Exception as e:
+        st.error("Authentication error.")
+        st.code(repr(e))
+        st.stop()
 
-    if email:
-        doms, ems = _get_allowlists()
-
-        # allow if email OR domain matches (when any allowlist is set)
-        if ems or doms:
-            allowed = False
-
-            if ems and email in ems:
-                allowed = True
-
-            if (not allowed) and doms and "@" in email:
-                if email.split("@", 1)[1] in doms:
-                    allowed = True
-
-            if not allowed:
-                st.error(f"Access denied: {email} is not allowed.")
-                if hasattr(st, "logout"):
-                    st.logout()
-                st.stop()
-
-        return email   # ✅ INSIDE FUNCTION
-
-    st.info("Please sign in to continue.")
-    if st.button("Log in"):
-        st.login()
-    st.stop()
+    return ""
 
 
 # --- run auth ---
 AUTH_EMAIL = require_login()
 
-# --- lock role from Secrets ---
-if AUTH_EMAIL:
-    st.session_state.auth_role = role_for_email(AUTH_EMAIL)
-else:
-    st.session_state.auth_role = "viewer"
+# --- lock role from Secrets (NO UI override) ---
+st.session_state.auth_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
 
-
-# ------------------------------------------------------------
-# Sidebar: role display / admin override
-# ------------------------------------------------------------
-if AUTH_EMAIL:
-    locked_role = st.session_state.get("auth_role", "viewer")
-
-    if locked_role == "admin":
-        st.session_state.auth_role = st.selectbox(
-            "Role (admin can override for testing)",
-            ["viewer", "editor", "reviewer", "admin"],
-            index=["viewer", "editor", "reviewer", "admin"].index(locked_role),
-        )
-    else:
-        st.caption("Role (locked)")
-        st.write(f"**{locked_role}**")
-
-    st.caption(f"Signed in as: **{AUTH_EMAIL}**")
-
-    if hasattr(st, "logout"):
-        if st.button("Logout", use_container_width=True):
-            st.logout()
 
 # ============================================================
 # Auth roles / permissions
@@ -352,14 +372,10 @@ ROLE_PERMS = {
     "viewer":   set(),
 }
 
-def can(action: str) -> bool:
-    if "auth_role" not in st.session_state:
-        return False
-    return action in ROLE_PERMS.get(
-        st.session_state.get("auth_role", "viewer"),
-        set()
-    )
 
+def can(action: str) -> bool:
+    role = st.session_state.get("auth_role", "viewer")
+    return action in ROLE_PERMS.get(role, set())
 
 # ============================================================
 # Gemini client
@@ -375,36 +391,6 @@ client = genai.Client(api_key=api_key)
 # ============================================================
 # Helpers
 # ============================================================
-
-def flesch_kincaid(text: str) -> float:
-    if not text or len(text.strip()) < 30:
-        return 99.0
-
-    sentences = max(1, len(re.findall(r"[.!?]+", text)))
-    words = max(1, len(re.findall(r"\b\w+\b", text)))
-    syllables = sum(_count_syllables(w) for w in re.findall(r"\b\w+\b", text))
-
-    try:
-        grade = 0.39 * (words / sentences) + 11.8 * (syllables / words) - 15.59
-        return round(max(0.0, grade), 1)
-    except Exception:
-        return 99.0
-
-
-def _count_syllables(word: str) -> int:
-    word = word.lower()
-    vowels = "aeiouy"
-    count = 0
-    prev = False
-    for c in word:
-        is_vowel = c in vowels
-        if is_vowel and not prev:
-            count += 1
-        prev = is_vowel
-    if word.endswith("e"):
-        count = max(1, count - 1)
-    return max(1, count)
-
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -958,123 +944,24 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
 # ============================================================
 def safe_generate(prompt: str, retries: int = LLM_RETRIES):
     delay = 2
-    last_exc = None
-
-    for attempt in range(1, retries + 1):
+    for _ in range(retries):
         try:
             return client.models.generate_content(
                 model=LLM_MODEL,
                 contents=prompt,
                 config={"temperature": 0.1, "max_output_tokens": 550},
             )
-        except Exception as e:
-            last_exc = e
-            if DEBUG_LLM:
-                st.sidebar.error(f"LLM error attempt {attempt}/{retries}")
-                st.sidebar.code(repr(e))
+        except ClientError:
             time.sleep(delay)
             delay = min(delay * 2, 30)
-
-    # Always show the final error (even if DEBUG off)
-    st.error("LLM call failed after retries.")
-    st.code(repr(last_exc) if last_exc else "Unknown error")
     return None
-
-def _response_text(resp) -> str:
-    """Aggressive best-effort extraction of text from google-genai response."""
-    if resp is None:
-        return ""
-
-    # 1) Normal path
-    t = getattr(resp, "text", None)
-    if isinstance(t, str) and t.strip():
-        return t.strip()
-
-    # 2) Candidates path
-    cands = getattr(resp, "candidates", None)
-    if cands:
-        for c in cands:
-            content = getattr(c, "content", None)
-            parts = getattr(content, "parts", None) or []
-            for p in parts:
-                pt = getattr(p, "text", None)
-                if isinstance(pt, str) and pt.strip():
-                    return pt.strip()
-
-    # 3) Some versions store output deeper
-    try:
-        d = resp.__dict__
-        for k in ("output_text", "result", "response", "data"):
-            v = d.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-    except Exception:
-        pass
-
-    # 4) LAST resort: stringify the whole object so you can see *something*
-    s = str(resp)
-    return s.strip() if isinstance(s, str) else ""
-    
-def _extract_json_object(raw: str) -> Optional[dict]:
-    if not raw:
-        return None
-
-    s = raw.strip()
-
-    if s.startswith("```"):
-        s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
-        s = re.sub(r"\s*```$", "", s)
-
-    m = re.search(r"\{[\s\S]*\}", s)
-    if not m:
-        return None
-
-    chunk = m.group(0).strip()
-    last = chunk.rfind("}")
-    if last != -1:
-        chunk = chunk[: last + 1]
-
-    try:
-        return json.loads(chunk)
-    except Exception:
-        return None
-
-        # fallback: save something visible instead of blanks
-    return {
-        "en": capped_text.strip(),
-        "fr": capped_text.strip(),
-        "grade_en": 99.0,
-        "grade_fr": 0.0,
-        "truncated": truncated,
-        "source_lang": source_lang,
-    }
-
-
-    chunk = m.group(0).strip()
-
-    # remove trailing junk after last brace if needed
-    last = chunk.rfind("}")
-    if last != -1:
-        chunk = chunk[: last + 1]
-
-    try:
-        return json.loads(chunk)
-    except Exception:
-        return None
 
 def convert_chunk(text: str, source_lang: str, doc_id: str, section_id: int, user_email: str) -> Dict[str, Any]:
     capped_text, truncated = truncate_words(text, MAX_CHUNK_WORDS)
-
-    best = {
-        "en": "",
-        "fr": "",
-        "grade_en": 99.0,
-        "grade_fr": 0.0,
-        "truncated": truncated,
-        "source_lang": source_lang,
-    }
+    best = {"en": "", "fr": "", "grade_en": 99.0, "grade_fr": 0.0, "truncated": truncated, "source_lang": source_lang}
 
     lang_hint = source_lang if source_lang and source_lang != "unknown" else "unknown"
+    extra_rules = ""
     if lang_hint == "fr":
         extra_rules = "- Source text is French. Produce English plain-language translation + French plain-language rewrite.\n"
     elif lang_hint == "en":
@@ -1082,7 +969,7 @@ def convert_chunk(text: str, source_lang: str, doc_id: str, section_id: int, use
     else:
         extra_rules = "- Source text language may be mixed/unknown. Preserve meaning; translate as needed.\n"
 
-    for attempt in range(1, 4):
+    for attempt in range(3):
         prompt = f"""
 Return JSON ONLY: {{ "en": "...", "fr": "..." }}
 
@@ -1097,11 +984,24 @@ SOURCE_LANG_DETECTED: {lang_hint}
 
 TEXT:
 {capped_text}
-""".strip()
-
+"""
         r = safe_generate(prompt)
-        raw_out = _response_text(r)
+        if not r:
+            # log failed attempt
+            log_usage(
+                action="llm_convert_failed",
+                user_email=user_email,
+                doc_id=doc_id,
+                section_id=section_id,
+                model=LLM_MODEL,
+                prompt_text=prompt,
+                output_text="",
+                meta={"attempt": attempt + 1, "reason": "no_response"},
+            )
+            break
 
+        raw_out = getattr(r, "text", "") or ""
+        # log raw usage for billing/analytics (input prompt + raw output)
         log_usage(
             action="llm_convert",
             user_email=user_email,
@@ -1110,56 +1010,31 @@ TEXT:
             model=LLM_MODEL,
             prompt_text=prompt,
             output_text=raw_out,
-            meta={"attempt": attempt, "source_lang": lang_hint, "truncated": truncated},
+            meta={"attempt": attempt + 1, "source_lang": lang_hint, "truncated": truncated},
         )
 
-        data = _extract_json_object(raw_out)
-        if not isinstance(data, dict):
-            continue
+        try:
+            m = re.search(r"\{.*\}", raw_out, re.S)
+            if not m:
+                continue
+            data = json.loads(m.group())
+            en = (data.get("en") or "").strip()
+            fr = (data.get("fr") or "").strip()
+            if not en or not fr:
+                continue
 
-        en = (data.get("en") or "").strip()
-        fr = (data.get("fr") or "").strip()
+            ge = flesch_kincaid(en)
+            gf = french_readability(fr)
 
-        # ✅ If model gave text, KEEP IT no matter what readability does
-        if en and fr:
-            # Compute readability, but don't let it wipe outputs
-            try:
-                ge = float(flesch_kincaid(en))
-            except Exception:
-                ge = 99.0
-            try:
-                gf = float(french_readability(fr))
-            except Exception:
-                gf = 0.0
-
-            # ✅ Update best even if ge=99, as long as best is empty OR grade improved
-            if (not best["en"]) or (ge < best["grade_en"]):
-                best = {
-                    "en": en,
-                    "fr": fr,
-                    "grade_en": ge,
-                    "grade_fr": gf,
-                    "truncated": truncated,
-                    "source_lang": source_lang,
-                }
+            if ge < best["grade_en"]:
+                best = {"en": en, "fr": fr, "grade_en": ge, "grade_fr": gf, "truncated": truncated, "source_lang": source_lang}
 
             if ge <= 8:
                 return best
-
-        # If JSON exists but one side missing, try again
-        continue
-
-    # ✅ FINAL SAFETY: never return blank outputs
-    if not best["en"] or not best["fr"]:
-        fallback = capped_text.strip()
-        best["en"] = best["en"] or fallback
-        best["fr"] = best["fr"] or fallback
+        except Exception:
+            continue
 
     return best
-
-
-
-
 
 
 # ============================================================
@@ -1283,6 +1158,100 @@ def build_docx(snapshot: Dict[str, Any]) -> bytes:
     doc.save(bio)
     return bio.getvalue()
 
+def build_pdf(snapshot: Dict[str, Any]) -> bytes:
+    buff = io.BytesIO()
+    c = canvas.Canvas(buff, pagesize=letter)
+    width, height = letter
+
+    # ✅ Watermark DRAFT vs APPROVED
+    status = overall_doc_status(snapshot)
+    pdf_watermark(c, status, width, height)
+
+    def draw_wrapped(text: str, x: float, y: float, max_width: float, leading: float = 12) -> float:
+        words = text.split()
+        line = ""
+        for w in words:
+            test = (line + " " + w).strip()
+            if c.stringWidth(test) <= max_width:
+                line = test
+            else:
+                c.drawString(x, y, line)
+                y -= leading
+                line = w
+                if y < 1 * inch:
+                    c.showPage()
+                    pdf_watermark(c, status, width, height)
+                    y = height - 1 * inch
+        if line:
+            c.drawString(x, y, line)
+            y -= leading
+        return y
+
+    y = height - 1 * inch
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(1 * inch, y, "GovCan Plain Language Converter")
+    y -= 18
+
+    c.setFont("Helvetica", 10)
+    c.drawString(1 * inch, y, f"Document ID: {snapshot.get('doc_id','')}")
+    y -= 14
+    c.drawString(1 * inch, y, f"Saved: {snapshot.get('saved_at','')}")
+    y -= 14
+
+    meta = snapshot.get("meta", {})
+    c.drawString(1 * inch, y, f"Detected language: {meta.get('detected_lang','unknown')}")
+    y -= 14
+    c.drawString(1 * inch, y, f"OCR used: {meta.get('ocr_used', False)} | OCR failed: {meta.get('ocr_failed', False)} | Pages: {meta.get('pages_requested','')}")
+    y -= 18
+
+    for s in snapshot.get("sections", []):
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(1 * inch, y, s.get("title", "Section"))
+        y -= 16
+
+        c.setFont("Helvetica", 10)
+        c.drawString(1 * inch, y, f"Status: {s.get('status','draft')} | Reviewer: {s.get('reviewer','')}")
+        y -= 14
+
+        if s.get("comment"):
+            y = draw_wrapped(f"Comment: {s.get('comment','')}", 1*inch, y, width - 2*inch, leading=12)
+
+        if s.get("approved_at"):
+            y = draw_wrapped(f"Approved at: {s.get('approved_at','')}", 1*inch, y, width - 2*inch, leading=12)
+
+        y -= 8
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(1 * inch, y, "Original")
+        y -= 12
+        c.setFont("Helvetica", 9)
+        y = draw_wrapped(s.get("original", ""), 1*inch, y, width - 2*inch, leading=11)
+
+        y -= 6
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(1 * inch, y, "English (Plain Language)")
+        y -= 12
+        c.setFont("Helvetica", 9)
+        y = draw_wrapped(s.get("en", ""), 1*inch, y, width - 2*inch, leading=11)
+
+        y -= 6
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(1 * inch, y, "Français (Langage clair)")
+        y -= 12
+        c.setFont("Helvetica", 9)
+        y = draw_wrapped(s.get("fr", ""), 1*inch, y, width - 2*inch, leading=11)
+
+        y -= 10
+        c.setFont("Helvetica-Oblique", 9)
+        c.drawString(1 * inch, y, f"EN Grade: {s.get('grade_en','')} | FR Readability: {s.get('grade_fr','')}")
+        y -= 20
+
+        c.showPage()
+        pdf_watermark(c, status, width, height)
+        y = height - 1 * inch
+
+    c.save()
+    return buff.getvalue()
+
 def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     buff = io.BytesIO()
     c = canvas.Canvas(buff, pagesize=letter)
@@ -1311,7 +1280,7 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     y -= 16
 
     c.setFont("Helvetica", 11)
-
+    
     lines = [
         "Target: English readability at Grade 8 or below (Flesch–Kincaid).",
         "Interpretation: Sections marked OVER exceed target and should be revised.",
@@ -1324,7 +1293,6 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
         f"OCR used: {stats['ocr_used']} | OCR failed: {stats['ocr_failed']}",
         f"Reviewers: {', '.join(stats['reviewers']) if stats['reviewers'] else '—'}",
     ]
-
     if stats["ocr_used"]:
         lines.append("Note: OCR text quality may affect readability scores and translation accuracy.")
 
@@ -1341,12 +1309,10 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     for s in snapshot.get("sections", []) or []:
         title = (s.get("title") or "Section").strip()
         stt = s.get("status", "draft")
-
         try:
             ge = float(s.get("grade_en", 99.0) or 99.0)
         except Exception:
             ge = 99.0
-
         ok = "OK" if ge <= 8 else "OVER"
         trunc = "TRUNC" if s.get("truncated") else ""
         row = f"- {title} | status={stt} | grade_en={ge} ({ok}) {trunc}".strip()
@@ -1362,7 +1328,6 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
 
     c.save()
     return buff.getvalue()
-
 
 
 # ============================================================
@@ -1387,9 +1352,10 @@ if "page_preview_imgs" not in st.session_state:
 # ============================================================
 with st.sidebar:
     st.header("Controls")
-
     st.caption("Role (locked from Secrets)")
     st.write(f"**{st.session_state.get('auth_role','viewer')}**")
+    if AUTH_EMAIL:
+        st.caption(f"Signed in as: {AUTH_EMAIL}")
 
     if hasattr(st, "logout") and st.button("Logout", use_container_width=True):
         st.logout()
@@ -1399,11 +1365,7 @@ with st.sidebar:
     st.success(f"SQLite ✅ ({SQLITE_PATH})")
 
     st.divider()
-    doc_id_in = st.text_input(
-        "Document ID",
-        value=st.session_state.doc_id,
-        placeholder="e.g., client-abc-001"
-    )
+    doc_id_in = st.text_input("Document ID", value=st.session_state.doc_id, placeholder="e.g., client-abc-001")
 
     # ✅ FIX: changing document id should not lock extraction cache
     if doc_id_in != st.session_state.doc_id:
@@ -1412,7 +1374,6 @@ with st.sidebar:
         st.session_state.last_extract_key = ""  # ✅ IMPORTANT
 
     c1, c2 = st.columns(2)
-
     with c1:
         if st.button("Load latest", use_container_width=True):
             if st.session_state.doc_id:
@@ -1465,11 +1426,7 @@ with st.sidebar:
         summ = analytics_summary(days=days)
         st.caption(f"Since: {summ['since_iso']}")
         st.write(f"Events: **{summ['total_events']}**")
-        st.write(
-            f"Tokens (in/out): **{summ['tokens_in']} / {summ['tokens_out']}**  | "
-            f"Total: **{summ['tokens_total']}**"
-        )
-
+        st.write(f"Tokens (in/out): **{summ['tokens_in']} / {summ['tokens_out']}**  | Total: **{summ['tokens_total']}**")
         if BILLING_RATE_PER_1K > 0:
             st.write(f"Estimated cost (@ {BILLING_RATE_PER_1K}/1K): **{summ['estimated_cost']}**")
         else:
@@ -1489,271 +1446,274 @@ with st.sidebar:
             use_container_width=True
         )
 
+
 # ============================================================
 # Main UI
 # ============================================================
 left, right = st.columns(2)
 
 with left:
-  up = st.file_uploader("Upload PDF or DOCX", ["pdf", "docx"])
-  pages = st.slider("PDF pages to extract/preview", 1, 25, 3)
+    up = st.file_uploader("Upload PDF or DOCX", ["pdf", "docx"])
+    pages = st.slider("PDF pages to extract/preview", 1, 25, 3)
 
-  preview = st.toggle("Preview pages", value=False)
-  show_ocr_conf = st.toggle("Show OCR confidence highlighting (OCR only)", value=False)
+    preview = st.toggle("Preview pages", value=False)
+    show_ocr_conf = st.toggle("Show OCR confidence highlighting (OCR only)", value=False)
 
-  if up:
-      b = up.getvalue()
-      key = f"{up.name}:{sha12(b)}:pages={pages}"
+    if up:
+        b = up.getvalue()
+        key = f"{up.name}:{sha12(b)}:pages={pages}"
 
-      should_extract = (key != st.session_state.last_extract_key) or (not st.session_state.input_text.strip())
-      if should_extract:
-          with st.spinner("Extracting text (OCR if needed)..."):
-              if up.name.lower().endswith(".pdf"):
-                  txt, meta = extract_pdf(b, pages)
-                  if preview:
-                      try:
-                          st.session_state.page_preview_imgs = pdf_to_images(b, pages, dpi=160)
-                      except Exception:
-                          st.session_state.page_preview_imgs = []
-              else:
-                  txt, meta = extract_docx(b)
-                  st.session_state.page_preview_imgs = []
+        should_extract = (key != st.session_state.last_extract_key) or (not st.session_state.input_text.strip())
 
-              txt, truncated_doc = clamp_text(txt, MAX_DOC_CHARS)
-              meta["doc_truncated"] = truncated_doc
-              meta["doc_chars_after_cap"] = len(txt)
+        if should_extract:
+            with st.spinner("Extracting text (OCR if needed)..."):
+                if up.name.lower().endswith(".pdf"):
+                    txt, meta = extract_pdf(b, pages)
+                    if preview:
+                        try:
+                            st.session_state.page_preview_imgs = pdf_to_images(b, pages, dpi=160)
+                        except Exception:
+                            st.session_state.page_preview_imgs = []
+                else:
+                    txt, meta = extract_docx(b)
+                    st.session_state.page_preview_imgs = []
 
-              st.session_state.last_extract_key = key
-              st.session_state.extract_meta = meta
-              st.session_state.input_text = txt
+                txt, truncated_doc = clamp_text(txt, MAX_DOC_CHARS)
+                meta["doc_truncated"] = truncated_doc
+                meta["doc_chars_after_cap"] = len(txt)
 
-  meta = st.session_state.extract_meta or {}
-  if meta:
-      if meta.get("ocr_failed"):
-          st.error("OCR failed ❌ (check tesseract install / language packs)")
-      elif meta.get("ocr_used"):
-          st.success(
-              f"OCR used ✅ — OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | "
-              f"Detected: {meta.get('detected_lang','unknown')}"
-          )
-      else:
-          st.info(f"Native extraction used ✅ — Detected: {meta.get('detected_lang','unknown')}")
+                st.session_state.last_extract_key = key
+                st.session_state.extract_meta = meta
+                st.session_state.input_text = txt
 
-      if meta.get("doc_truncated"):
-          st.warning(f"Input capped at {MAX_DOC_CHARS} characters before LLM calls.")
+    meta = st.session_state.extract_meta or {}
+    if meta:
+        if meta.get("ocr_failed"):
+            st.error("OCR failed ❌ (check tesseract install / language packs)")
+        elif meta.get("ocr_used"):
+            st.success(f"OCR used ✅ — OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | Detected: {meta.get('detected_lang','unknown')}")
+        else:
+            st.info(f"Native extraction used ✅ — Detected: {meta.get('detected_lang','unknown')}")
 
-      if not LANGDETECT_OK:
-          st.warning("Language detection library not available (langdetect).")
-          if LANGDETECT_ERR:
-              st.code(LANGDETECT_ERR)
-          st.caption(f"Python used by Streamlit: {sys.executable}")
+        if meta.get("doc_truncated"):
+            st.warning(f"Input capped at {MAX_DOC_CHARS} characters before LLM calls.")
 
-  if show_ocr_conf and meta and meta.get("ocr_used") and isinstance(meta.get("ocr_conf", {}), dict):
-      ocr_conf = meta.get("ocr_conf", {})
-      html_pages = ocr_conf.get("html_pages", [])
-      thr = ocr_conf.get("thresholds", {"low": OCR_LOW_CONF, "med": OCR_MED_CONF})
+        if not LANGDETECT_OK:
+            st.warning("Language detection library not available (langdetect).")
+            if LANGDETECT_ERR:
+                st.code(LANGDETECT_ERR)
+            st.caption(f"Python used by Streamlit: {sys.executable}")
 
-      st.subheader("OCR confidence highlighting")
-      st.caption(f"Red < {thr.get('low')} | Orange < {thr.get('med')} (hover words to see confidence)")
-      if html_pages:
-          for i, html in enumerate(html_pages, start=1):
-              st.markdown(f"**Page {i}**")
-              st.markdown(html, unsafe_allow_html=True)
-              st.divider()
-      else:
-          st.info("No OCR confidence data available.")
+    if show_ocr_conf and meta and meta.get("ocr_used") and isinstance(meta.get("ocr_conf", {}), dict):
+        ocr_conf = meta.get("ocr_conf", {})
+        html_pages = ocr_conf.get("html_pages", [])
+        thr = ocr_conf.get("thresholds", {"low": OCR_LOW_CONF, "med": OCR_MED_CONF})
 
-  if preview and st.session_state.page_preview_imgs:
-      st.subheader("Page preview")
-      for i, img in enumerate(st.session_state.page_preview_imgs, start=1):
-          st.image(img, caption=f"Page {i}", use_container_width=True)
+        st.subheader("OCR confidence highlighting")
+        st.caption(f"Red < {thr.get('low')} | Orange < {thr.get('med')} (hover words to see confidence)")
+        if html_pages:
+            for i, html in enumerate(html_pages, start=1):
+                st.markdown(f"**Page {i}**", unsafe_allow_html=False)
+                st.markdown(html, unsafe_allow_html=True)
+                st.divider()
+        else:
+            st.info("No OCR confidence data available.")
 
-  user_text = st.text_area("Input text", height=320, key="input_text")
+    if preview and st.session_state.page_preview_imgs:
+        st.subheader("Page preview")
+        for i, img in enumerate(st.session_state.page_preview_imgs, start=1):
+            st.image(img, caption=f"Page {i}", use_container_width=True)
 
-  if not can("convert"):
-      st.info("You don’t have permission to convert. Ask an admin to grant editor/admin role.")
+    user_text = st.text_area("Input text", height=320, key="input_text")
+    st.caption(f"Chars: {len(user_text)} | Words: {word_count(user_text)}")
 
-  convert_disabled = (not can("convert")) or (not st.session_state.doc_id) or (not user_text.strip())
-  convert_btn = st.button("Convert & Save Version", type="primary", disabled=convert_disabled)
+    with st.expander("Extraction diagnostics"):
+        st.write(meta)
 
+    convert_disabled = (not can("convert")) or (not st.session_state.doc_id) or (not user_text.strip())
+    convert_btn = st.button("Convert & Save Version", type="primary", disabled=convert_disabled)
 
 with right:
-  if convert_btn:
-      safe_text, _ = clamp_text(user_text, MAX_DOC_CHARS)
+    if convert_btn:
+        safe_text, cut = clamp_text(user_text, MAX_DOC_CHARS)
 
-      doc_lang = detect_lang(safe_text)
-      st.session_state.extract_meta = st.session_state.extract_meta or {}
-      st.session_state.extract_meta["detected_lang"] = st.session_state.extract_meta.get("detected_lang") or doc_lang
+        doc_lang = detect_lang(safe_text)
+        st.session_state.extract_meta = st.session_state.extract_meta or {}
+        st.session_state.extract_meta["detected_lang"] = st.session_state.extract_meta.get("detected_lang") or doc_lang
 
-      chunks = split_by_headings(safe_text)
+        chunks = split_by_headings(safe_text)
 
-      out_sections: List[Dict[str, Any]] = []
-      prog = st.progress(0)
-      for i, (title, body) in enumerate(chunks, start=1):
-          chunk_lang = detect_lang(body) if len(body) >= 80 else doc_lang
-          res = convert_chunk(
-              body,
-              source_lang=chunk_lang,
-              doc_id=st.session_state.doc_id,
-              section_id=i - 1,
-              user_email=AUTH_EMAIL,
-          )
+        out_sections: List[Dict[str, Any]] = []
+        prog = st.progress(0)
+        for i, (title, body) in enumerate(chunks, start=1):
+            chunk_lang = detect_lang(body) if len(body) >= 80 else doc_lang
+            res = convert_chunk(
+                body,
+                source_lang=chunk_lang,
+                doc_id=st.session_state.doc_id,
+                section_id=i - 1,
+                user_email=AUTH_EMAIL,
+            )
 
-          out_sections.append({
-              "id": i - 1,
-              "title": title,
-              "original": body,
-              "en": res["en"],
-              "fr": res["fr"],
-              "grade_en": res["grade_en"],
-              "grade_fr": res["grade_fr"],
-              "truncated": res["truncated"],
-              "source_lang": res.get("source_lang", chunk_lang),
-              "status": "draft",
-              "reviewer": "",
-              "comment": "",
-              "approved_at": "",
-          })
-          prog.progress(int(i / max(1, len(chunks)) * 100))
-      prog.empty()
+            out_sections.append({
+                "id": i - 1,
+                "title": title,
+                "original": body,
+                "en": res["en"],
+                "fr": res["fr"],
+                "grade_en": res["grade_en"],
+                "grade_fr": res["grade_fr"],
+                "truncated": res["truncated"],
+                "source_lang": res.get("source_lang", chunk_lang),
+                "status": "draft",
+                "reviewer": "",
+                "comment": "",
+                "approved_at": "",
+            })
+            prog.progress(int(i / max(1, len(chunks)) * 100))
+        prog.empty()
 
-      snap = {
-          "doc_id": st.session_state.doc_id,
-          "saved_at": now_iso(),
-          "meta": st.session_state.extract_meta or {},
-          "source_text": safe_text,
-          "sections": out_sections,
-      }
+        snap = {
+            "doc_id": st.session_state.doc_id,
+            "saved_at": now_iso(),
+            "meta": st.session_state.extract_meta or {},
+            "source_text": safe_text,
+            "sections": out_sections,
+        }
 
-      save_version(st.session_state.doc_id, snap)
-      st.session_state.snapshot = snap
+        save_version(st.session_state.doc_id, snap)
+        st.session_state.snapshot = snap
 
-      log_usage(
-          action="save_version_after_convert",
-          user_email=AUTH_EMAIL,
-          doc_id=st.session_state.doc_id,
-          section_id=None,
-          model=LLM_MODEL,
-          prompt_text="",
-          output_text="",
-          meta={"sections": len(out_sections), "doc_chars": len(safe_text), "doc_words": word_count(safe_text)},
-      )
+        log_usage(
+            action="save_version_after_convert",
+            user_email=AUTH_EMAIL,
+            doc_id=st.session_state.doc_id,
+            section_id=None,
+            model=LLM_MODEL,
+            prompt_text="",
+            output_text="",
+            meta={"sections": len(out_sections), "doc_chars": len(safe_text), "doc_words": word_count(safe_text)},
+        )
 
-      st.success("Saved ✅ (SQLite versioned; approvals/comments persist)")
+        st.success("Saved ✅ (SQLite versioned; approvals/comments persist)")
 
-  snap = st.session_state.snapshot
-  if not snap:
-      st.caption("Upload a document, enter a Document ID, then Convert.")
-  else:
-      st.subheader("Reviewer workflow + exports")
-      st.caption(f"Overall document status: **{overall_doc_status(snap)}**")
+    snap = st.session_state.snapshot
+    if not snap:
+        st.caption("Upload a document, enter a Document ID, then Convert.")
+    else:
+        st.subheader("Reviewer workflow + exports")
 
-      sections = snap.get("sections", [])
-      for s in sections:
-          st.markdown(f"## {s.get('title','Section')}")
+        st.caption(f"Overall document status: **{overall_doc_status(snap)}**")
 
-          ge = float(s.get("grade_en", 99.0) or 99.0)
-          if ge <= 8:
-              st.success(f"EN Grade {ge} ✔")
-          else:
-              st.warning(f"EN Grade {ge} (above 8)")
+        sections = snap.get("sections", [])
+        for s in sections:
+            st.markdown(f"## {s.get('title','Section')}")
 
-          st.info(f"FR Readability: {s.get('grade_fr', 0.0)}")
-          st.caption(f"Source lang detected: {s.get('source_lang','unknown')}")
+            ge = float(s.get("grade_en", 99.0) or 99.0)
+            if ge <= 8:
+                st.success(f"EN Grade {ge} ✔")
+            else:
+                st.warning(f"EN Grade {ge} (above 8)")
 
-          if s.get("truncated"):
-              st.warning(f"Section truncated to {MAX_CHUNK_WORDS} words before LLM call.")
+            st.info(f"FR Readability: {s.get('grade_fr', 0.0)}")
+            st.caption(f"Source lang detected: {s.get('source_lang','unknown')}")
 
-          if can("edit_outputs"):
-              s["en"] = st.text_area("English output", value=s.get("en", ""), key=f"en_{s['id']}", height=140)
-              s["fr"] = st.text_area("French output", value=s.get("fr", ""), key=f"fr_{s['id']}", height=140)
-          else:
-              st.markdown("### English")
-              st.write(s.get("en", ""))
-              st.markdown("### Français")
-              st.write(s.get("fr", ""))
+            if s.get("truncated"):
+                st.warning(f"Section truncated to {MAX_CHUNK_WORDS} words before LLM call.")
 
-          if can("approve"):
-              s["reviewer"] = st.text_input("Reviewer name", value=s.get("reviewer", ""), key=f"rev_{s['id']}")
-              s["comment"] = st.text_area("Reviewer comment", value=s.get("comment", ""), key=f"com_{s['id']}", height=90)
+            if can("edit_outputs"):
+                s["en"] = st.text_area("English output", value=s.get("en", ""), key=f"en_{s['id']}", height=140)
+                s["fr"] = st.text_area("French output", value=s.get("fr", ""), key=f"fr_{s['id']}", height=140)
+            else:
+                st.markdown("### English")
+                st.write(s.get("en", ""))
+                st.markdown("### Français")
+                st.write(s.get("fr", ""))
 
-              status_options = ["draft", "reviewed", "approved"]
-              s["status"] = st.selectbox(
-                  "Status",
-                  status_options,
-                  index=status_options.index(s.get("status", "draft")),
-                  key=f"stat_{s['id']}"
-              )
+            if can("approve"):
+                s["reviewer"] = st.text_input("Reviewer name", value=s.get("reviewer", ""), key=f"rev_{s['id']}")
+                s["comment"] = st.text_area("Reviewer comment", value=s.get("comment", ""), key=f"com_{s['id']}", height=90)
 
-              if s["status"] == "approved" and not s.get("approved_at"):
-                  s["approved_at"] = now_iso()
-              if s["status"] != "approved":
-                  s["approved_at"] = ""
-          else:
-              st.caption("Approval locked (reviewer/admin only).")
+                status_options = ["draft", "reviewed", "approved"]
+                s["status"] = st.selectbox(
+                    "Status",
+                    status_options,
+                    index=status_options.index(s.get("status", "draft")),
+                    key=f"stat_{s['id']}"
+                )
 
-          st.divider()
+                if s["status"] == "approved" and not s.get("approved_at"):
+                    s["approved_at"] = now_iso()
+                if s["status"] != "approved":
+                    s["approved_at"] = ""
 
-      c1, c2, c3, c4 = st.columns(4)
+            st.divider()
 
-      with c1:
-          if st.button("Save changes as new version", disabled=not st.session_state.doc_id):
-              snap["saved_at"] = now_iso()
-              snap["sections"] = sections
-              save_version(st.session_state.doc_id, snap)
-              st.session_state.snapshot = snap
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            if st.button("Save changes as new version", disabled=not st.session_state.doc_id):
+                snap["saved_at"] = now_iso()
+                snap["sections"] = sections
+                save_version(st.session_state.doc_id, snap)
+                st.session_state.snapshot = snap
 
-              log_usage(
-                  action="save_version_after_review",
-                  user_email=AUTH_EMAIL,
-                  doc_id=st.session_state.doc_id,
-                  section_id=None,
-                  model="",
-                  meta={"overall_status": overall_doc_status(snap)},
-              )
-              st.success("Saved updated version ✅")
+                log_usage(
+                    action="save_version_after_review",
+                    user_email=AUTH_EMAIL,
+                    doc_id=st.session_state.doc_id,
+                    section_id=None,
+                    model="",
+                    meta={"overall_status": overall_doc_status(snap)},
+                )
 
-      with c2:
-          if can("export"):
-              docx_bytes = build_docx(snap)
-              st.download_button(
-                  "Download DOCX",
-                  data=docx_bytes,
-                  file_name=f"{safe_filename(st.session_state.doc_id)}.docx",
-                  mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                  use_container_width=True
-              )
-              log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(docx_bytes)})
-          else:
-              st.caption("Export locked (editor/reviewer/admin only).")
+                st.success("Saved updated version ✅")
 
-      with c3:
-          if can("export"):
-              pdf_bytes = build_pdf(snap)
-              st.download_button(
-                  "Download PDF",
-                  data=pdf_bytes,
-                  file_name=f"{safe_filename(st.session_state.doc_id)}.pdf",
-                  mime="application/pdf",
-                  use_container_width=True
-              )
-              log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(pdf_bytes)})
-          else:
-              st.caption("Export locked (editor/reviewer/admin only).")
+        with c2:
+            if can("export"):
+                docx_bytes = build_docx(snap)
+                st.download_button(
+                    "Download DOCX",
+                    data=docx_bytes,
+                    file_name=f"{safe_filename(st.session_state.doc_id)}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True
+                )
+                log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(docx_bytes)})
 
-      with c4:
-          if can("export"):
-              comp_pdf = build_compliance_report_pdf(snap)
-              st.download_button(
-                  "Compliance Report (PDF)",
-                  data=comp_pdf,
-                  file_name=f"{safe_filename(st.session_state.doc_id)}_compliance.pdf",
-                  mime="application/pdf",
-                  use_container_width=True
-              )
-              log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
-          else:
-              st.caption("Export locked (editor/reviewer/admin only).")
+        with c3:
+            if can("export"):
+                pdf_bytes = build_pdf(snap)
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_bytes,
+                    file_name=f"{safe_filename(st.session_state.doc_id)}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+                log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(pdf_bytes)})
+
+        with c4:
+            if can("export"):
+                comp_pdf = build_compliance_report_pdf(snap)
+                st.download_button(
+                    "Compliance Report (PDF)",
+                    data=comp_pdf,
+                    file_name=f"{safe_filename(st.session_state.doc_id)}_compliance.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+                log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
+
+
+
+
+
+
+
+
+
+
 
 
 
