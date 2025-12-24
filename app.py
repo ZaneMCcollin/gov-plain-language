@@ -361,6 +361,24 @@ AUTH_EMAIL = require_login()
 st.session_state.auth_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
 
 
+# --- OPTIONAL: admin-only UI role switch (dev/testing) ---
+ENABLE_ROLE_SWITCH = str(st.secrets.get("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes")
+
+if ENABLE_ROLE_SWITCH and st.session_state.auth_role == "admin":
+    st.sidebar.markdown("### Admin: Role override (testing)")
+    override = st.sidebar.selectbox(
+        "Act as role",
+        ["admin", "editor", "reviewer", "viewer"],
+        index=["admin", "editor", "reviewer", "viewer"].index(st.session_state.get("role_override", "admin")),
+    )
+    st.session_state.role_override = override
+
+    if st.sidebar.button("Reset to locked role", use_container_width=True):
+        st.session_state.role_override = "admin"
+
+    # Use overridden role everywhere else
+    st.session_state.auth_role = st.session_state.get("role_override", "admin")
+
 # ============================================================
 # Auth roles / permissions
 # ============================================================
@@ -1768,6 +1786,7 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
 
 
 
