@@ -357,28 +357,28 @@ def require_login() -> str:
 # --- run auth ---
 AUTH_EMAIL = require_login()
 
-# --- lock role from Secrets (NO UI override) ---
-st.session_state.auth_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
-
+# --- locked role from Secrets (source of truth) ---
+locked_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
+st.session_state.locked_role = locked_role
 
 # --- OPTIONAL: admin-only UI role switch (dev/testing) ---
 ENABLE_ROLE_SWITCH = str(st.secrets.get("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes")
 
-if ENABLE_ROLE_SWITCH and st.session_state.auth_role == "admin":
+effective_role = locked_role
+if ENABLE_ROLE_SWITCH and locked_role == "admin":
     st.sidebar.markdown("### Admin: Role override (testing)")
-    override = st.sidebar.selectbox(
+    effective_role = st.sidebar.selectbox(
         "Act as role",
         ["admin", "editor", "reviewer", "viewer"],
         index=["admin", "editor", "reviewer", "viewer"].index(st.session_state.get("role_override", "admin")),
+        key="role_override",
     )
-    st.session_state.role_override = override
-
     if st.sidebar.button("Reset to locked role", use_container_width=True):
         st.session_state.role_override = "admin"
+        effective_role = "admin"
 
-    # Use overridden role everywhere else
-    st.session_state.auth_role = st.session_state.get("role_override", "admin")
-
+# This is what the rest of the app uses
+st.session_state.auth_role = effective_role
 # ============================================================
 # Auth roles / permissions
 # ============================================================
@@ -1786,6 +1786,156 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
