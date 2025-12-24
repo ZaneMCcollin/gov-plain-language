@@ -939,6 +939,66 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
     return out if out else [("Preamble", text.strip())]
 
 
+
+# ============================================================
+# Readability scoring (no external deps)
+# ============================================================
+_VOWELS = "aeiouyàâäæçéèêëîïôöœùûüÿ"
+
+def _count_sentences(text: str) -> int:
+    # Rough sentence split on ., !, ?, ; and newlines.
+    if not text:
+        return 1
+    s = re.split(r"[.!?;]+|\n+", text)
+    n = sum(1 for part in s if part.strip())
+    return max(1, n)
+
+def _count_words(text: str) -> int:
+    return max(1, len(re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:'[A-Za-zÀ-ÖØ-öø-ÿ]+)?", text or "")))
+
+def _count_syllables_word(word: str) -> int:
+    # Heuristic: count vowel groups; ensure at least 1 syllable.
+    w = (word or "").lower()
+    if not w:
+        return 1
+    # remove non-letters
+    w = re.sub(r"[^a-zà-öø-ÿ]", "", w)
+    if not w:
+        return 1
+    groups = re.findall(rf"[{_VOWELS}]+", w)
+    syl = len(groups)
+
+    # Basic silent-e handling for English
+    if w.endswith("e") and not w.endswith(("le", "ye")) and syl > 1:
+        syl -= 1
+
+    return max(1, syl)
+
+def _count_syllables(text: str) -> int:
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:'[A-Za-zÀ-ÖØ-öø-ÿ]+)?", text or "")
+    return sum(_count_syllables_word(w) for w in words) or 1
+
+def flesch_kincaid(text: str) -> float:
+    """Flesch–Kincaid Grade Level (English). Lower is easier."""
+    words = _count_words(text)
+    sentences = _count_sentences(text)
+    syllables = _count_syllables(text)
+    grade = 0.39 * (words / sentences) + 11.8 * (syllables / words) - 15.59
+    # Clamp to sane range for display
+    return round(max(0.0, min(20.0, float(grade))), 2)
+
+def french_readability(text: str) -> float:
+    """
+    French Flesch Reading Ease-style score (higher is easier).
+    We keep the same structure: 207 - 1.015*(W/S) - 73.6*(SYL/W).
+    """
+    words = _count_words(text)
+    sentences = _count_sentences(text)
+    syllables = _count_syllables(text)
+    score = 207.0 - 1.015 * (words / sentences) - 73.6 * (syllables / words)
+    return round(float(score), 2)
+
+
 # ============================================================
 # LLM (rate-limit safe + caps BEFORE calling) + ✅ usage logging
 # ============================================================
@@ -1703,6 +1763,81 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
