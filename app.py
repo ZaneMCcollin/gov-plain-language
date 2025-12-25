@@ -387,6 +387,105 @@ if ENABLE_ROLE_SWITCH and locked_role == "admin":
     st.session_state.auth_role = st.session_state.get("role_override", locked_role)
 
 
+# ============================================================
+
+# ============================================================
+# 💼 Client workspaces (multi-tenant namespace)
+# ============================================================
+
+def _safe_workspace_key(k: str) -> str:
+    k = (k or "").strip().lower()
+    k = re.sub(r"[^a-z0-9_-]+", "_", k).strip("_")
+    return k or "default"
+
+
+def _workspaces_config() -> Dict[str, Dict[str, Any]]:
+    """Read workspaces from Secrets.
+
+    Example:
+
+    ENABLE_WORKSPACE_SWITCH = "true"
+
+    [workspaces]
+    default = { name="Default", domains="", emails="" }
+    clienta  = { name="Client A", domains="clienta.com", emails="" }
+    clientb  = { name="Client B", domains="", emails="person@clientb.ca" }
+    """
+    ws = st.secrets.get("workspaces", {})
+    if not isinstance(ws, Mapping):
+        return {"default": {"name": "Default", "domains": [], "emails": []}}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for raw_key, cfg in ws.items():
+        key = _safe_workspace_key(str(raw_key))
+        if not isinstance(cfg, Mapping):
+            cfg = {"name": str(raw_key), "domains": "", "emails": ""}
+        name = str(cfg.get("name", raw_key))
+        domains = _normalize_email_list(cfg.get("domains", ""))  # treat as comma list
+        # domains should be pure domains; strip anything after @
+        domains = [d.split("@", 1)[-1].lower() for d in domains if d]
+        emails = _normalize_email_list(cfg.get("emails", ""))
+        out[key] = {"name": name, "domains": domains, "emails": emails}
+
+    if "default" not in out:
+        out["default"] = {"name": "Default", "domains": [], "emails": []}
+    return out
+
+
+def workspace_for_email(email: str) -> str:
+    email = (email or "").strip().lower()
+    dom = email.split("@", 1)[1] if ("@" in email) else ""
+    ws = _workspaces_config()
+
+    # Priority: explicit email match, then domain match, else default
+    for k, cfg in ws.items():
+        if email and email in (cfg.get("emails") or []):
+            return k
+    for k, cfg in ws.items():
+        if dom and dom in (cfg.get("domains") or []):
+            return k
+    return "default"
+
+
+def scoped_doc_id(doc_id: str, workspace: str) -> str:
+    """Create a storage key that isolates docs per-client."""
+    d = (doc_id or "").strip()
+    w = _safe_workspace_key(workspace)
+    if not d:
+        return ""
+    return f"{w}::{d}"
+
+
+# Determine workspace (locked from Secrets) + optional admin override
+locked_workspace = workspace_for_email(AUTH_EMAIL) if AUTH_EMAIL else "default"
+st.session_state.workspace_locked = locked_workspace
+
+ENABLE_WORKSPACE_SWITCH = str(st.secrets.get("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1", "true", "yes")
+
+active_workspace = locked_workspace
+if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin":
+    # Admin can switch workspaces for testing/support without changing allowlists
+    ws_cfg = _workspaces_config()
+    ws_keys = sorted(ws_cfg.keys())
+    st.sidebar.divider()
+    st.sidebar.subheader("Admin: Workspace override (testing)")
+
+    if "workspace_override" not in st.session_state:
+        st.session_state.workspace_override = locked_workspace
+
+    st.sidebar.selectbox("Act in workspace", ws_keys, key="workspace_override")
+
+    if st.sidebar.button("Reset workspace to locked", use_container_width=True):
+        st.session_state.pop("workspace_override", None)
+        st.rerun()
+
+    active_workspace = st.session_state.get("workspace_override", locked_workspace)
+
+st.session_state.workspace = _safe_workspace_key(active_workspace)
+
+if AUTH_EMAIL:
+    log_audit(event="login_success", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id="", meta={"role": st.session_state.get("auth_role")})
+
 
 # ============================================================
 # Auth roles / permissions
@@ -1476,6 +1575,8 @@ with st.sidebar:
     st.write(f"**{st.session_state.get('auth_role','viewer')}**")
     if AUTH_EMAIL:
         st.caption(f"Signed in as: {AUTH_EMAIL}")
+    st.caption(f"Workspace (active): {st.session_state.get('workspace', 'default')}")
+    st.caption(f"Workspace (locked): {st.session_state.get('workspace_locked', 'default')}")
 
     if hasattr(st, "logout") and st.button("Logout", use_container_width=True):
         st.logout()
@@ -1497,7 +1598,7 @@ with st.sidebar:
     with c1:
         if st.button("Load latest", use_container_width=True):
             if st.session_state.doc_id:
-                snap = load_latest(st.session_state.doc_id)
+                snap = load_latest(scoped_doc_id(st.session_state.doc_id, st.session_state.workspace))
                 st.session_state.snapshot = snap
                 st.session_state.last_extract_key = ""
                 if snap:
@@ -1519,18 +1620,19 @@ with st.sidebar:
 
     st.divider()
     if st.session_state.doc_id:
-        versions = list_versions(st.session_state.doc_id)
+        versions = list_versions(scoped_doc_id(st.session_state.doc_id, st.session_state.workspace))
         if versions:
             vsel = st.selectbox("Version history", versions, index=0)
             if can("rollback") and st.button("Rollback to selected", use_container_width=True):
-                ok = set_latest(st.session_state.doc_id, vsel)
+                ok = set_latest(scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), vsel)
                 if ok:
-                    snap = load_latest(st.session_state.doc_id)
+                    snap = load_latest(scoped_doc_id(st.session_state.doc_id, st.session_state.workspace))
                     st.session_state.snapshot = snap
                     st.session_state.last_extract_key = ""
                     if snap:
                         st.session_state.input_text = snap.get("source_text", "")
                         st.session_state.extract_meta = snap.get("meta", {})
+                    log_audit(event="rollback", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"version": vsel})
                     st.success(f"Rolled back to {vsel}")
                     st.rerun()
                 else:
@@ -1564,6 +1666,68 @@ with st.sidebar:
             file_name=f"usage_events_last_{days}_days.csv",
             mime="text/csv",
             use_container_width=True
+        )
+
+        # 🧾 Admin Audit Logs (security trace)
+        st.divider()
+        st.subheader("Audit Logs")
+
+        ws_filter_mode = st.selectbox("Workspace scope", ["Current workspace", "All workspaces"], index=0)
+        audit_days = st.slider("Audit lookback (days)", 1, 180, 30, key="audit_days")
+        q_user = st.text_input("Filter: user email contains", value="", key="audit_user_contains")
+        q_event = st.text_input("Filter: event contains", value="", key="audit_event_contains")
+        max_rows = st.slider("Rows to show", 50, 500, 200, key="audit_max_rows")
+
+        def audit_query(days: int, workspace: str, all_workspaces: bool, user_contains: str, event_contains: str, limit: int):
+            since = (datetime.now(timezone.utc).timestamp() - days * 86400)
+            since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
+            conn = _db()
+            cur = conn.cursor()
+            sql = "SELECT ts, user_email, event, workspace, doc_id, meta_json FROM audit_logs WHERE ts >= ?"
+            params: List[Any] = [since_iso]
+            if not all_workspaces:
+                sql += " AND workspace = ?"
+                params.append(workspace or "default")
+            if user_contains.strip():
+                sql += " AND lower(user_email) LIKE ?"
+                params.append(f"%{user_contains.strip().lower()}%")
+            if event_contains.strip():
+                sql += " AND lower(event) LIKE ?"
+                params.append(f"%{event_contains.strip().lower()}%")
+            sql += " ORDER BY ts DESC LIMIT ?"
+            params.append(int(limit))
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall() or []
+            conn.close()
+            return since_iso, rows
+
+        all_ws = (ws_filter_mode == "All workspaces")
+        since_iso, rows = audit_query(audit_days, st.session_state.get("workspace","default"), all_ws, q_user, q_event, max_rows)
+        st.caption(f"Showing up to {max_rows} rows since {since_iso}")
+
+        if rows:
+            # Render a lightweight table
+            st.dataframe(
+                [{"ts": r[0], "user": r[1], "event": r[2], "workspace": r[3], "doc_id": r[4], "meta": r[5]} for r in rows],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # CSV export
+            out = io.StringIO()
+            w = csv.writer(out)
+            w.writerow(["ts", "user_email", "event", "workspace", "doc_id", "meta_json"])
+            for r in rows:
+                w.writerow(list(r))
+            st.download_button(
+                "Download audit CSV (shown rows)",
+                data=out.getvalue().encode("utf-8"),
+                file_name=f"audit_logs_{'all' if all_ws else st.session_state.get('workspace','default')}_{audit_days}d.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        else:
+            st.info("No audit logs found for these filters.")
         )
 
 
@@ -1670,7 +1834,7 @@ with right:
             res = convert_chunk(
                 body,
                 source_lang=chunk_lang,
-                doc_id=st.session_state.doc_id,
+                doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace),
                 section_id=i - 1,
                 user_email=AUTH_EMAIL,
             )
@@ -1701,13 +1865,13 @@ with right:
             "sections": out_sections,
         }
 
-        save_version(st.session_state.doc_id, snap)
+        save_version(scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), snap)
         st.session_state.snapshot = snap
 
         log_usage(
             action="save_version_after_convert",
             user_email=AUTH_EMAIL,
-            doc_id=st.session_state.doc_id,
+            doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace),
             section_id=None,
             model=LLM_MODEL,
             prompt_text="",
@@ -1715,6 +1879,7 @@ with right:
             meta={"sections": len(out_sections), "doc_chars": len(safe_text), "doc_words": word_count(safe_text)},
         )
 
+        log_audit(event="convert_and_save", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"sections": len(out_sections)})
         st.success("Saved ✅ (SQLite versioned; approvals/comments persist)")
 
     snap = st.session_state.snapshot
@@ -1774,18 +1939,19 @@ with right:
             if st.button("Save changes as new version", disabled=not st.session_state.doc_id):
                 snap["saved_at"] = now_iso()
                 snap["sections"] = sections
-                save_version(st.session_state.doc_id, snap)
+                save_version(scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), snap)
                 st.session_state.snapshot = snap
 
                 log_usage(
                     action="save_version_after_review",
                     user_email=AUTH_EMAIL,
-                    doc_id=st.session_state.doc_id,
+                    doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace),
                     section_id=None,
                     model="",
                     meta={"overall_status": overall_doc_status(snap)},
                 )
 
+                log_audit(event="save_review_changes", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"overall_status": overall_doc_status(snap)})
                 st.success("Saved updated version ✅")
 
         with c2:
@@ -1798,7 +1964,8 @@ with right:
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     use_container_width=True
                 )
-                log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(docx_bytes)})
+                log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(docx_bytes)})
+                log_audit(event="export_docx", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(docx_bytes)})
 
         with c3:
             if can("export"):
@@ -1810,7 +1977,8 @@ with right:
                     mime="application/pdf",
                     use_container_width=True
                 )
-                log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(pdf_bytes)})
+                log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(pdf_bytes)})
+                log_audit(event="export_pdf_full", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(pdf_bytes)})
 
         with c4:
             if can("export"):
@@ -1822,7 +1990,8 @@ with right:
                     mime="application/pdf",
                     use_container_width=True
                 )
-                log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+                log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
+                log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
 
 
 
@@ -3021,6 +3190,1810 @@ with right:
 
 
     
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
 
 
 
