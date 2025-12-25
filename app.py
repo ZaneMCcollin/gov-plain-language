@@ -361,30 +361,34 @@ AUTH_EMAIL = require_login()
 locked_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
 st.session_state.locked_role = locked_role
 
-# --- OPTIONAL: admin-only role switch (testing) ---
+# --- OPTIONAL: admin-only UI role switch (dev/testing) ---
 ENABLE_ROLE_SWITCH = str(st.secrets.get("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes")
 
 effective_role = locked_role
 
+# NOTE: Streamlit widgets "own" their session_state keys. To safely reset a widget value,
+# set a flag and apply the value BEFORE the widget is created on the next rerun.
 if ENABLE_ROLE_SWITCH and locked_role == "admin":
-    st.sidebar.markdown("### Admin: Role override (testing)")
+    if st.session_state.get("_reset_role_override", False):
+        st.session_state["role_override"] = locked_role
+        st.session_state["_reset_role_override"] = False
 
+    st.sidebar.markdown("### Admin: Role override (testing)")
     effective_role = st.sidebar.selectbox(
         "Act as role",
         ["admin", "editor", "reviewer", "viewer"],
         key="role_override",
         index=["admin", "editor", "reviewer", "viewer"].index(
-            st.session_state.get("role_override", "admin")
+            st.session_state.get("role_override", locked_role)
         ),
     )
 
     if st.sidebar.button("Reset to locked role", use_container_width=True):
-        st.session_state.update({"role_override": locked_role})
+        st.session_state["_reset_role_override"] = True
         st.rerun()
 
-# 👇 this is the ONLY role the rest of the app uses
+# This is what the rest of the app uses
 st.session_state.auth_role = effective_role
-
 # ============================================================
 # Auth roles / permissions
 # ============================================================
@@ -405,10 +409,6 @@ def can(action: str) -> bool:
     if role == "admin":
         return True
     return action in ROLE_PERMS.get(role, set())
-
-st.sidebar.caption(f"Role (locked): {st.session_state.locked_role}")
-st.sidebar.caption(f"Role (active): {st.session_state.auth_role}")
-
 
 # ============================================================
 # Gemini client
@@ -1796,6 +1796,156 @@ with right:
                     use_container_width=True
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
