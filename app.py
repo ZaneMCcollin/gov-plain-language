@@ -1728,7 +1728,6 @@ with st.sidebar:
             )
         else:
             st.info("No audit logs found for these filters.")
-        )
 
 
 # ============================================================
@@ -4993,6 +4992,7 @@ with right:
 
 
     
+
 
 
 
