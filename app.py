@@ -356,127 +356,9 @@ def require_login() -> str:
 
 # --- run auth ---
 AUTH_EMAIL = require_login()
-if AUTH_EMAIL:
-    log_audit(event='login_success', user_email=AUTH_EMAIL, doc_id='', meta={})
 
 # --- lock role from Secrets (NO UI override) ---
 st.session_state.auth_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
-
-# ============================================================
-# ✅ Client workspaces (multi-tenant) + optional admin role override (testing)
-# ============================================================
-def _workspaces_config() -> Dict[str, Dict[str, Any]]:
-    """Read workspaces from Secrets.
-
-    Example Secrets (TOML):
-    ENABLE_ROLE_SWITCH = "true"
-    ENABLE_WORKSPACE_SWITCH = "true"
-
-    [workspaces]
-    default = { name="Default", domains="", emails="" }
-    clientA = { name="Client A", domains="clienta.com", emails="" }
-    clientB = { name="Client B", domains="", emails="user@clientb.ca" }
-    """
-    ws = st.secrets.get("workspaces", {})
-    if not isinstance(ws, Mapping):
-        return {"default": {"name": "Default", "domains": [], "emails": []}}
-
-    out: Dict[str, Dict[str, Any]] = {}
-    for ws_id, cfg in ws.items():
-        if isinstance(cfg, Mapping):
-            name = str(cfg.get("name") or ws_id)
-            doms = _normalize_email_list(cfg.get("domains"))
-            ems = _normalize_email_list(cfg.get("emails"))
-        else:
-            # Allow shorthand: workspaces.clientA = "clienta.com"
-            name = str(ws_id)
-            doms = _normalize_email_list(cfg)
-            ems = []
-        out[str(ws_id)] = {"name": name, "domains": doms, "emails": ems}
-
-    if "default" not in out:
-        out["default"] = {"name": "Default", "domains": [], "emails": []}
-    return out
-
-
-def workspace_for_email(email: str) -> str:
-    """Return the matching workspace_id for an email. Falls back to 'default'."""
-    email = (email or "").strip().lower()
-    dom = email.split("@", 1)[1] if "@" in email else ""
-    cfg = _workspaces_config()
-
-    matches: List[str] = []
-    for ws_id, c in cfg.items():
-        if email and email in (c.get("emails") or []):
-            matches.append(ws_id)
-        elif dom and dom in (c.get("domains") or []):
-            matches.append(ws_id)
-
-    if not matches:
-        return "default"
-    # deterministic
-    return sorted(matches)[0]
-
-
-def doc_key(display_doc_id: str) -> str:
-    """Internal doc key stored in DB, namespaced by workspace."""
-    ws = st.session_state.get("workspace_id", "default")
-    display_doc_id = (display_doc_id or "").strip()
-    return f"{ws}::{display_doc_id}" if display_doc_id else ""
-
-
-# --- lock workspace from Secrets (based on email) ---
-locked_ws = workspace_for_email(AUTH_EMAIL) if AUTH_EMAIL else "default"
-st.session_state.locked_workspace_id = locked_ws
-st.session_state.workspace_id = locked_ws  # default active
-
-ENABLE_ROLE_SWITCH = str(st.secrets.get("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes")
-ENABLE_WORKSPACE_SWITCH = str(st.secrets.get("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1", "true", "yes")
-
-# Optional: admin can impersonate other roles (testing)
-if ENABLE_ROLE_SWITCH and st.session_state.auth_role == "admin":
-    st.sidebar.markdown("### Admin: Role override (testing)")
-    # Use a separate key to avoid widget/session conflicts
-    st.sidebar.selectbox(
-        "Act as role",
-        ["admin", "editor", "reviewer", "viewer"],
-        key="role_override",
-        index=["admin", "editor", "reviewer", "viewer"].index(st.session_state.get("role_override", "admin")),
-    )
-    if st.sidebar.button("Reset role override", use_container_width=True):
-        st.session_state["reset_role_override"] = True
-        st.rerun()
-
-    if st.session_state.get("reset_role_override"):
-        st.session_state.pop("reset_role_override", None)
-        st.session_state["role_override"] = "admin"
-
-    st.session_state.auth_role = st.session_state.get("role_override", "admin")
-
-# Optional: admin can switch active workspace (testing / support)
-if ENABLE_WORKSPACE_SWITCH and st.session_state.auth_role == "admin":
-    cfg = _workspaces_config()
-    options = list(cfg.keys())
-    labels = {k: f"{cfg[k].get('name', k)} ({k})" for k in options}
-
-    st.sidebar.markdown("### Admin: Workspace switch (testing)")
-    chosen = st.sidebar.selectbox(
-        "Active workspace",
-        options=options,
-        format_func=lambda k: labels.get(k, k),
-        key="workspace_override",
-        index=options.index(st.session_state.get("workspace_override", locked_ws)) if st.session_state.get("workspace_override", locked_ws) in options else 0,
-    )
-    if st.sidebar.button("Reset workspace", use_container_width=True):
-        st.session_state["reset_workspace_override"] = True
-        st.rerun()
-
-    if st.session_state.get("reset_workspace_override"):
-        st.session_state.pop("reset_workspace_override", None)
-        st.session_state["workspace_override"] = locked_ws
-
-    st.session_state.workspace_id = st.session_state.get("workspace_override", locked_ws)
-
 
 
 # ============================================================
@@ -492,12 +374,7 @@ ROLE_PERMS = {
 
 
 def can(action: str) -> bool:
-    """Permission check.
-    Admin is a superuser: always allowed. Other roles are action-based.
-    """
     role = st.session_state.get("auth_role", "viewer")
-    if role == "admin":
-        return True
     return action in ROLE_PERMS.get(role, set())
 
 # ============================================================
@@ -622,7 +499,7 @@ def analytics_export_csv(days: int = 30) -> bytes:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT ts, workspace_id, user_email, role, action, doc_id, section_id, model,
+        SELECT ts, user_email, action, doc_id, section_id, model,
                prompt_chars, output_chars, est_tokens_in, est_tokens_out, meta_json
         FROM usage_events
         WHERE ts >= ?
@@ -636,38 +513,12 @@ def analytics_export_csv(days: int = 30) -> bytes:
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow([
-        "ts", "workspace_id", "user_email", "role", "action", "doc_id", "section_id", "model",
+        "ts", "user_email", "action", "doc_id", "section_id", "model",
         "prompt_chars", "output_chars", "est_tokens_in", "est_tokens_out", "meta_json"
     ])
     for r in rows:
         w.writerow(list(r))
 
-    return out.getvalue().encode("utf-8")
-
-
-def audit_export_csv(days: int = 30) -> bytes:
-    since = (datetime.now(timezone.utc).timestamp() - days * 86400)
-    since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
-
-    conn = _db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT ts, workspace_id, user_email, role, event, doc_id, meta_json
-        FROM audit_logs
-        WHERE ts >= ?
-        ORDER BY ts DESC
-        """,
-        (since_iso,),
-    )
-    rows = cur.fetchall() or []
-    conn.close()
-
-    out = io.StringIO()
-    w = csv.writer(out)
-    w.writerow(["ts","workspace_id","user_email","role","event","doc_id","meta_json"])
-    for r in rows:
-        w.writerow(list(r))
     return out.getvalue().encode("utf-8")
 
 
@@ -680,23 +531,6 @@ def _db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
-
-
-def _col_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
-    try:
-        cur = conn.execute(f"PRAGMA table_info({table})")
-        cols = [r[1] for r in cur.fetchall()]
-        return col in cols
-    except Exception:
-        return False
-
-def _add_col_if_missing(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
-    if _col_exists(conn, table, col):
-        return
-    try:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-    except Exception:
-        return
 
 def _db_init() -> None:
     conn = _db()
@@ -724,9 +558,7 @@ def _db_init() -> None:
         CREATE TABLE IF NOT EXISTS usage_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT NOT NULL,
-            workspace_id TEXT,
             user_email TEXT,
-            role TEXT,
             action TEXT NOT NULL,
             doc_id TEXT,
             section_id INTEGER,
@@ -742,28 +574,22 @@ def _db_init() -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(user_email, ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_doc ON usage_events(doc_id, ts DESC)")
 
+    # Audit logs (security + traceability)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT NOT NULL,
-            workspace_id TEXT,
             user_email TEXT,
-            role TEXT,
             event TEXT NOT NULL,
+            workspace TEXT,
             doc_id TEXT,
-            ip_hint TEXT,
             meta_json TEXT
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_email, ts DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ws ON audit_logs(workspace, ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_doc ON audit_logs(doc_id, ts DESC)")
-
-    # migrations for older DBs
-    _add_col_if_missing(conn, "usage_events", "workspace_id", "TEXT")
-    _add_col_if_missing(conn, "usage_events", "role", "TEXT")
-    _add_col_if_missing(conn, "audit_logs", "workspace_id", "TEXT")
-    _add_col_if_missing(conn, "audit_logs", "role", "TEXT")
     conn.commit()
     conn.close()
 
@@ -790,10 +616,10 @@ def log_usage(
         conn = _db()
         conn.execute(
             """
-            INSERT INTO usage_events(ts, workspace_id, user_email, role, action, doc_id, section_id, model, prompt_chars, output_chars, est_tokens_in, est_tokens_out, meta_json)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO usage_events(ts, user_email, action, doc_id, section_id, model, prompt_chars, output_chars, est_tokens_in, est_tokens_out, meta_json)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
             """,
-            (now_iso(), st.session_state.get('workspace_id','default'), (user_email or '').lower(), st.session_state.get('auth_role','viewer'), action, doc_id, section_id, model, prompt_chars, output_chars, tin, tout, meta_json),
+            (now_iso(), (user_email or "").lower(), action, doc_id, section_id, model, prompt_chars, output_chars, tin, tout, meta_json),
         )
         conn.commit()
         conn.close()
@@ -802,41 +628,19 @@ def log_usage(
 
 
 
-def log_audit(
-    event: str,
-    user_email: str = "",
-    doc_id: str = "",
-    meta: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Write an audit event (non-LLM actions, security & workflow evidence)."""
+def log_audit(event: str, user_email: str = "", doc_id: str = "", workspace: str = "", meta: Optional[Dict[str, Any]] = None) -> None:
+    """Write an audit log event to SQLite. Safe: never raises."""
     try:
-        meta_json = json.dumps(meta or {}, ensure_ascii=False)
         conn = _db()
+        meta_json = json.dumps(meta or {}, ensure_ascii=False)
         conn.execute(
-            """
-            INSERT INTO audit_logs(ts, workspace_id, user_email, role, event, doc_id, ip_hint, meta_json)
-            VALUES(?,?,?,?,?,?,?,?)
-            """,
-            (
-                now_iso(),
-                st.session_state.get("workspace_id", "default"),
-                (user_email or "").lower(),
-                st.session_state.get("auth_role", "viewer"),
-                event,
-                doc_id,
-                os.environ.get("REMOTE_ADDR", "")[:64],
-                meta_json,
-            ),
+            "INSERT INTO audit_logs(ts, user_email, event, workspace, doc_id, meta_json) VALUES(?,?,?,?,?,?)",
+            (now_iso(), (user_email or "").lower(), event, workspace or "", doc_id or "", meta_json),
         )
         conn.commit()
         conn.close()
     except Exception:
         return
-# Audit: record login and role/workspace assignment
-if AUTH_EMAIL:
-    log_audit(event="login_success", user_email=AUTH_EMAIL, doc_id="", meta={"locked_role": st.session_state.get("auth_role"), "workspace": st.session_state.get("workspace_id")})
-
-
 def _ensure_doc(doc_id: str) -> None:
     conn = _db()
     cur = conn.cursor()
@@ -1482,12 +1286,6 @@ def build_pdf(snapshot: Dict[str, Any]) -> bytes:
     c.setFont("Helvetica", 10)
     c.drawString(1 * inch, y, f"Document ID: {snapshot.get('doc_id','')}")
     y -= 14
-    c.drawString(1 * inch, y, f"Workspace: {st.session_state.get('workspace_id','default')}")
-    y -= 14
-    c.drawString(1 * inch, y, f"Prepared by: {(AUTH_EMAIL or '').lower()}")
-    y -= 14
-    c.drawString(1 * inch, y, f"Generated at (UTC): {now_iso()}")
-    y -= 14
     c.drawString(1 * inch, y, f"Saved: {snapshot.get('saved_at','')}")
     y -= 14
 
@@ -1545,48 +1343,6 @@ def build_pdf(snapshot: Dict[str, Any]) -> bytes:
     c.save()
     return buff.getvalue()
 
-
-
-def audit_query(days: int = 30, limit: int = 200) -> List[Tuple[Any, ...]]:
-    since = (datetime.now(timezone.utc).timestamp() - days * 86400)
-    since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
-    conn = _db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT ts, workspace_id, user_email, role, event, doc_id, meta_json
-        FROM audit_logs
-        WHERE ts >= ?
-        ORDER BY ts DESC
-        LIMIT ?
-        """,
-        (since_iso, int(limit)),
-    )
-    rows = cur.fetchall() or []
-    conn.close()
-    return rows
-
-def audit_for_doc(doc_id: str, limit: int = 25) -> List[Tuple[str, str, str, str]]:
-    """Return (ts, user_email, role, event) for a doc."""
-    try:
-        conn = _db()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT ts, COALESCE(user_email,''), COALESCE(role,''), event
-            FROM audit_logs
-            WHERE doc_id = ?
-            ORDER BY ts DESC
-            LIMIT ?
-            """,
-            (doc_id, int(limit)),
-        )
-        rows = cur.fetchall() or []
-        conn.close()
-        return [(r[0], r[1], r[2], r[3]) for r in rows]
-    except Exception:
-        return []
-
 def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     buff = io.BytesIO()
     c = canvas.Canvas(buff, pagesize=letter)
@@ -1604,12 +1360,6 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
 
     c.setFont("Helvetica", 11)
     c.drawString(1 * inch, y, f"Document ID: {snapshot.get('doc_id','')}")
-    y -= 14
-    c.drawString(1 * inch, y, f"Workspace: {st.session_state.get('workspace_id','default')}")
-    y -= 14
-    c.drawString(1 * inch, y, f"Prepared by: {(AUTH_EMAIL or '').lower()}")
-    y -= 14
-    c.drawString(1 * inch, y, f"Generated at (UTC): {now_iso()}")
     y -= 14
     c.drawString(1 * inch, y, f"Version saved at (UTC): {snapshot.get('saved_at','')}")
     y -= 14
@@ -1640,41 +1390,6 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     for line in lines:
         c.drawString(1 * inch, y, line)
         y -= 14
-
-    y -= 10
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(1 * inch, y, "Controls and evidence")
-    y -= 16
-    c.setFont("Helvetica", 10)
-    controls = [
-        "This report provides evidence of plain-language conversion, readability scoring, and reviewer workflow activity.",
-        "Readability scores are estimates; human review remains required for final publication decisions.",
-        "Where OCR was used, text quality may affect scores and translation accuracy.",
-    ]
-    for line in controls:
-        c.drawString(1 * inch, y, line[:120])
-        y -= 12
-
-    # Audit trail (most recent events)
-    y -= 6
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(1 * inch, y, "Audit trail (most recent)")
-    y -= 16
-    c.setFont("Helvetica", 9)
-    events = audit_for_doc(doc_key(snapshot.get("doc_id","")), limit=20)
-    if not events:
-        c.drawString(1 * inch, y, "—")
-        y -= 12
-    else:
-        for ts, ue, role, ev in events:
-            row = f"{ts} | {ue} | {role} | {ev}"
-            if y < 1 * inch:
-                c.showPage()
-                pdf_watermark(c, status, width, height)
-                y = height - 1 * inch
-                c.setFont("Helvetica", 9)
-            c.drawString(1 * inch, y, row[:120])
-            y -= 11
 
     y -= 8
     c.setFont("Helvetica-Bold", 12)
@@ -1753,7 +1468,7 @@ with st.sidebar:
     with c1:
         if st.button("Load latest", use_container_width=True):
             if st.session_state.doc_id:
-                snap = load_latest(doc_key(st.session_state.doc_id))
+                snap = load_latest(st.session_state.doc_id)
                 st.session_state.snapshot = snap
                 st.session_state.last_extract_key = ""
                 if snap:
@@ -1766,7 +1481,6 @@ with st.sidebar:
     with c2:
         if st.button("New doc", use_container_width=True):
             st.session_state.doc_id = f"doc-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
-            log_audit(event='doc_new', user_email=AUTH_EMAIL, doc_id=doc_key(st.session_state.doc_id), meta={'display_doc_id': st.session_state.doc_id})
             st.session_state.snapshot = None
             st.session_state.input_text = ""
             st.session_state.extract_meta = {}
@@ -1776,14 +1490,13 @@ with st.sidebar:
 
     st.divider()
     if st.session_state.doc_id:
-        versions = list_versions(doc_key(st.session_state.doc_id))
+        versions = list_versions(st.session_state.doc_id)
         if versions:
             vsel = st.selectbox("Version history", versions, index=0)
             if can("rollback") and st.button("Rollback to selected", use_container_width=True):
-                ok = set_latest(doc_key(st.session_state.doc_id), vsel)
+                ok = set_latest(st.session_state.doc_id, vsel)
                 if ok:
-                    log_audit(event='version_set_latest', user_email=AUTH_EMAIL, doc_id=doc_key(st.session_state.doc_id), meta={'display_doc_id': st.session_state.doc_id, 'version': vsel})
-                    snap = load_latest(doc_key(st.session_state.doc_id))
+                    snap = load_latest(st.session_state.doc_id)
                     st.session_state.snapshot = snap
                     st.session_state.last_extract_key = ""
                     if snap:
@@ -1800,15 +1513,6 @@ with st.sidebar:
     if can("analytics"):
         st.divider()
         st.subheader("Usage Analytics")
-
-    st.markdown("---")
-    st.subheader("Audit Logs")
-    if can("analytics"):
-        audit_days = st.slider("Lookback (days)", 1, 90, 30, key="audit_days")
-        if st.button("Export audit CSV", use_container_width=True):
-            audit_csv = audit_export_csv(audit_days)
-            st.download_button("Download audit CSV", data=audit_csv, file_name="audit_logs.csv", mime="text/csv", use_container_width=True)
-        st.caption("Tip: use admin role + workspace to filter actions.")
         days = st.slider("Lookback (days)", 1, 180, 30)
         summ = analytics_summary(days=days)
         st.caption(f"Since: {summ['since_iso']}")
@@ -1937,8 +1641,7 @@ with right:
             res = convert_chunk(
                 body,
                 source_lang=chunk_lang,
-                doc_id=doc_key(st.session_state.doc_id),
-                    
+                doc_id=st.session_state.doc_id,
                 section_id=i - 1,
                 user_email=AUTH_EMAIL,
             )
@@ -1969,14 +1672,13 @@ with right:
             "sections": out_sections,
         }
 
-        save_version(doc_key(st.session_state.doc_id), snap)
+        save_version(st.session_state.doc_id, snap)
         st.session_state.snapshot = snap
 
         log_usage(
             action="save_version_after_convert",
             user_email=AUTH_EMAIL,
-            doc_id=doc_key(st.session_state.doc_id),
-                    
+            doc_id=st.session_state.doc_id,
             section_id=None,
             model=LLM_MODEL,
             prompt_text="",
@@ -2043,14 +1745,13 @@ with right:
             if st.button("Save changes as new version", disabled=not st.session_state.doc_id):
                 snap["saved_at"] = now_iso()
                 snap["sections"] = sections
-                save_version(doc_key(st.session_state.doc_id), snap)
+                save_version(st.session_state.doc_id, snap)
                 st.session_state.snapshot = snap
 
                 log_usage(
                     action="save_version_after_review",
                     user_email=AUTH_EMAIL,
-                    doc_id=doc_key(st.session_state.doc_id),
-                    
+                    doc_id=st.session_state.doc_id,
                     section_id=None,
                     model="",
                     meta={"overall_status": overall_doc_status(snap)},
@@ -2068,8 +1769,7 @@ with right:
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     use_container_width=True
                 )
-                log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=doc_key(st.session_state.doc_id),
-                     model="", meta={"bytes": len(docx_bytes)})
+                log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(docx_bytes)})
 
         with c3:
             if can("export"):
@@ -2081,8 +1781,7 @@ with right:
                     mime="application/pdf",
                     use_container_width=True
                 )
-                log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=doc_key(st.session_state.doc_id),
-                     model="", meta={"bytes": len(pdf_bytes)})
+                log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(pdf_bytes)})
 
         with c4:
             if can("export"):
@@ -2094,8 +1793,7 @@ with right:
                     mime="application/pdf",
                     use_container_width=True
                 )
-                log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=doc_key(st.session_state.doc_id),
-                     model="", meta={"bytes": len(comp_pdf)})
+                log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=st.session_state.doc_id, model="", meta={"bytes": len(comp_pdf)})
 
 
 
@@ -2246,28 +1944,154 @@ with right:
 
 
 
-# ============================================================
-# Admin panel: Audit logs (workspace-aware)
-# ============================================================
-if can("analytics"):
-    with st.expander("🧾 Admin: Audit logs", expanded=False):
-        days = st.slider("Lookback (days)", 1, 90, 30, key="audit_view_days")
-        rows = audit_query(days=days, limit=300)
-        st.caption(f"Events: {len(rows)}")
-        if rows:
-            st.dataframe(
-                [{"ts": r[0], "workspace": r[1], "user": r[2], "role": r[3], "event": r[4], "doc_id": r[5]} for r in rows],
-                use_container_width=True,
-                height=260,
-            )
-        audit_csv = audit_export_csv(days=days)
-        st.download_button(
-            "Download audit CSV",
-            data=audit_csv,
-            file_name="audit_logs.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
 
 
 
