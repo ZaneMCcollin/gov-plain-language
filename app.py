@@ -208,9 +208,24 @@ OCR_MED_CONF = int(os.environ.get("OCR_MED_CONF", "80"))
 
 BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
 
-# Debug / dev toggles
-PROD = str(os.environ.get("PROD", "") or str(safe_secret("PROD", "true"))).lower() in ("1","true","yes")
-DEBUG = (not PROD) and (str(os.environ.get("DEBUG", "") or str(safe_secret("DEBUG", "false"))).lower() in ("1","true","yes"))
+# ============================================================
+# ENV FLAGS (define PROD before using it)
+# ============================================================
+
+def safe_secret(key: str, default=None):
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+# PROD: true on Streamlit Cloud unless explicitly overridden
+PROD = str(os.environ.get("PROD", "") or safe_secret("PROD", "") or "").lower() in ("1", "true", "yes")
+
+# DEBUG: only allowed when NOT PROD, and only if explicitly enabled
+DEBUG = (not PROD) and (
+    str(os.environ.get("DEBUG", "") or safe_secret("DEBUG", "false") or "").lower()
+    in ("1", "true", "yes")
+)
 
 # ============================================================
 # Page config
