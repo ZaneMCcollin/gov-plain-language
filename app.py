@@ -47,7 +47,12 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 
-st.write("SECRETS LOADED:", st.secrets.keys())
+
+try:
+    st.write("SECRETS LOADED:", list(st.secrets.to_dict().keys()))
+except Exception as e:
+    st.error(f"Secrets not available: {e!r}")
+
 
 
 # ============================================================
