@@ -304,25 +304,30 @@ def role_for_email(email: str) -> str:
     return "viewer"  # default if not listed
 
 def _auth_missing_keys() -> List[str]:
-    """Validate Streamlit auth Secrets for Option A (default provider)."""
+    """Validate Streamlit auth Secrets (supports [auth.google])."""
     try:
         auth = safe_secret("auth")
         if not isinstance(auth, Mapping):
             return ["[auth]"]
 
-        required = [
-            "redirect_uri",
-            "cookie_secret",
-            "client_id",
-            "client_secret",
-            "server_metadata_url",
-        ]
+        missing: List[str] = []
 
-        missing = []
-        for k in required:
+        # required under [auth]
+        for k in ("redirect_uri", "cookie_secret", "server_metadata_url"):
             v = auth.get(k) if hasattr(auth, "get") else auth[k]
             if not v:
                 missing.append(f"[auth].{k}")
+
+        # required under [auth.google]
+        google = auth.get("google") if hasattr(auth, "get") else auth["google"]
+        if not isinstance(google, Mapping):
+            missing.append("[auth.google]")
+        else:
+            if not (google.get("client_id") if hasattr(google, "get") else google["client_id"]):
+                missing.append("[auth.google].client_id")
+            if not (google.get("client_secret") if hasattr(google, "get") else google["client_secret"]):
+                missing.append("[auth.google].client_secret")
+
         return missing
     except Exception:
         return ["[auth]"]
@@ -2357,7 +2362,6 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
-
 
 
 
