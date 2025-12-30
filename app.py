@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # GovCan Plain Language Converter â€” ONE-FILE ENTERPRISE BUILD
 # (Cloud Run + SQLite + Reviewer workflow + Versioning + DOCX/PDF + OCR + Limits + Lang detect + OCR confidence)
 #
@@ -1144,29 +1144,44 @@ def _count_sentences(text: str) -> int:
     return max(1, n)
 
 def _count_words(text: str) -> int:
-    return max(1, len(re.findall(r"[A-Za-zÃ€-Ã–Ã˜-Ã¶Ã¸-Ã¿]+(?:'[A-Za-zÃ€-Ã–Ã˜-Ã¶Ã¸-Ã¿]+)?", text or "")))
+    """Count words in a Unicode-safe way.
+
+    Avoids fragile mojibake character ranges that can raise re.PatternError.
+    Matches sequences of Unicode letters (no digits/underscore), with optional apostrophe part.
+    """
+    if not text:
+        return 1
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", text, flags=re.UNICODE)
+    return max(1, len(words))
+
 
 def _count_syllables_word(word: str) -> int:
-    # Heuristic: count vowel groups; ensure at least 1 syllable.
+    """Heuristic syllable counter that is Unicode-safe."""
     w = (word or "").lower()
     if not w:
         return 1
-    # remove non-letters
-    w = re.sub(r"[^a-zÃ -Ã¶Ã¸-Ã¿]", "", w)
+    w = "".join(ch for ch in w if ch.isalpha())
     if not w:
         return 1
-    groups = re.findall(rf"[{_VOWELS}]+", w)
-    syl = len(groups)
-
-    # Basic silent-e handling for English
+    vowels = set("aeiouyàâäæéèêëîïôöœùûüÿ")
+    syl = 0
+    prev_vowel = False
+    for ch in w:
+        is_v = ch in vowels
+        if is_v and not prev_vowel:
+            syl += 1
+        prev_vowel = is_v
     if w.endswith("e") and not w.endswith(("le", "ye")) and syl > 1:
         syl -= 1
-
     return max(1, syl)
 
+
 def _count_syllables(text: str) -> int:
-    words = re.findall(r"[A-Za-zÃ€-Ã–Ã˜-Ã¶Ã¸-Ã¿]+(?:'[A-Za-zÃ€-Ã–Ã˜-Ã¶Ã¸-Ã¿]+)?", text or "")
+    if not text:
+        return 1
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", text, flags=re.UNICODE)
     return sum(_count_syllables_word(w) for w in words) or 1
+
 
 def flesch_kincaid(text: str) -> float:
     """Fleschâ€“Kincaid Grade Level (English). Lower is easier."""
@@ -2102,21 +2117,34 @@ with right:
         ]
         if over:
             over_sorted = sorted(over, key=lambda x: x[1], reverse=True)[:10]
-            st.error("Grade enforcement failed for one or more sections (must be Grade 8 or below).")
-            st.write("Worst sections:")
-            for t, g in over_sorted:
-                st.write(f"- {t}: {g:.2f}")
-            # Keep snapshot in-memory so user can edit, but do NOT save a version
-            snap["sections"] = out_sections
-            st.session_state.snapshot = snap
-            log_audit(
-                event="convert_failed_grade",
-                user_email=AUTH_EMAIL,
-                workspace=st.session_state.workspace,
-                doc_id=st.session_state.doc_id,
-                meta={"over": over_sorted},
-            )
-            st.stop()
+
+            # In production we block saving when strict enforcement is on.
+            # For admin/testing, allow saving as DRAFT but warn loudly.
+            strict = bool(st.session_state.get("STRICT_GRADE_ENFORCE", True))
+            allow_override = bool(DEBUG) or (st.session_state.get("auth_role") == "admin") or bool(st.session_state.get("workspace_override_testing"))
+
+            if strict and not allow_override:
+                st.error("Grade enforcement failed for one or more sections (must be Grade 8 or below).")
+                st.write("Worst sections:")
+                for t, g in over_sorted:
+                    st.write(f"- {t}: {g:.2f}")
+                # Keep snapshot in-memory so user can edit, but do NOT save a version
+                snap["sections"] = out_sections
+                st.session_state.snapshot = snap
+                log_audit(
+                    event="convert_failed_grade",
+                    user_email=AUTH_EMAIL,
+                    workspace=st.session_state.workspace,
+                    doc_id=st.session_state.doc_id,
+                    meta={"over": over_sorted},
+                )
+                st.stop()
+            else:
+                st.warning("Grade 8 target NOT met for one or more sections — saving as DRAFT (admin/testing override).")
+                st.write("Worst sections:")
+                for t, g in over_sorted:
+                    st.write(f"- {t}: {g:.2f}")
+                snap["grade_gate_failed"] = True
 
         snap["sections"] = out_sections
         save_version(doc_id_sc, snap)
@@ -2321,6 +2349,9 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
+
+
+
 
 
 
