@@ -47,6 +47,9 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 
+st.write("SECRETS LOADED:", st.secrets.keys())
+
+
 # ============================================================
 # Auto language detection (patched to show real error)
 # ============================================================
