@@ -1,20 +1,21 @@
 FROM python:3.11-slim
 
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# System deps (safe defaults)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+# System deps (tesseract optional; remove if you don't need OCR)
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY . .
+COPY . /app
 
-# Cloud Run provides PORT (usually 8080)
-ENV PORT=8080
-EXPOSE 8080
-
-CMD ["sh", "-lc", "python -m streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"]
+# Cloud Run sets $PORT. Streamlit must listen on it.
+CMD ["bash", "-lc", "streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true"]
 
