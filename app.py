@@ -15,8 +15,8 @@
 # - Streamlit Cloud ready (no fixed port in config.toml; Docker uses $PORT)
 # - Watermark: DRAFT vs APPROVED on PDFs + status banner on DOCX
 # - Compliance Report export (PDF summary)
-# - ✅ Auth: Streamlit built-in login (Google/OIDC) + domain/email allowlist
-# - ✅ Usage analytics: per-user events for billing insight + admin CSV export
+# - âœ… Auth: Streamlit built-in login (Google/OIDC) + domain/email allowlist
+# - âœ… Usage analytics: per-user events for billing insight + admin CSV export
 # ============================================================
 
 import os
@@ -32,12 +32,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
-
-
-# Hosting detection
-CLOUD_RUN = bool(os.environ.get("K_SERVICE") or os.environ.get("CLOUD_RUN"))
-
-
 
 from google import genai
 from google.genai.errors import ClientError
@@ -78,8 +72,8 @@ def _write_if_missing(path: str, content: str) -> None:
         f.write(content)
 
 def _bootstrap_project_files() -> None:
-    # ✅ Pin Streamlit new enough to support st.login / st.user
-    # ✅ Authlib required for Google auth on Streamlit Community Cloud
+    # âœ… Pin Streamlit new enough to support st.login / st.user
+    # âœ… Authlib required for Google auth on Streamlit Community Cloud
     _write_if_missing(
         "requirements.txt",
         "\n".join([
@@ -144,7 +138,7 @@ def _bootstrap_project_files() -> None:
         ])
     )
 
-    # ✅ Streamlit Cloud friendly: do NOT pin port/address here
+    # âœ… Streamlit Cloud friendly: do NOT pin port/address here
     os.makedirs(".streamlit", exist_ok=True)
     _write_if_missing(
         ".streamlit/config.toml",
@@ -160,7 +154,7 @@ def _bootstrap_project_files() -> None:
         ])
     )
 
-    # ✅ Minimal unit tests (stdlib unittest; no extra deps)
+    # âœ… Minimal unit tests (stdlib unittest; no extra deps)
     _write_if_missing(
         os.path.join("tests", "test_grading.py"),
         "\n".join([
@@ -214,8 +208,24 @@ OCR_MED_CONF = int(os.environ.get("OCR_MED_CONF", "80"))
 
 BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
 
+# ------------------------------------------------------------
+# Secrets helper (Cloud Run-safe)
+# ------------------------------------------------------------
+def safe_secret(key: str, default=None):
+    """Safely read Streamlit secrets without crashing when secrets.toml is absent (e.g., on Cloud Run)."""
+    try:
+        return safe_secret(key, default)
+    except Exception:
+        return default
+
 # Debug / dev toggles
-DEBUG = str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes") or str(st.secrets.get("DEBUG", "false")).lower() in ("1", "true", "yes")
+PROD = str(os.environ.get("PROD", "") or str(safe_secret("PROD", "false"))).lower() in ("1", "true", "yes")
+DEBUG = (not PROD) and (
+    str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes")
+    or str(safe_secret("DEBUG", "false")).lower() in ("1", "true", "yes")
+)
+
+# NOTE: Do not read st.secrets directly elsewhere for optional config. Use safe_secret().
 
 # ============================================================
 # Page config
@@ -234,15 +244,15 @@ if _is_streamlit_cloud():
 
 # ============================================================
 # ============================================================
-# ✅ Authentication + Allow-lists + Locked roles (from Secrets)
+# âœ… Authentication + Allow-lists + Locked roles (from Secrets)
 # ============================================================
 
 from collections.abc import Mapping
 
 def _get_allowlists() -> Tuple[List[str], List[str]]:
     """Read allow-lists from Secrets (comma-separated strings)."""
-    allowed_domains = st.secrets.get("ALLOWED_DOMAINS", "")
-    allowed_emails = st.secrets.get("ALLOWED_EMAILS", "")
+    allowed_domains = safe_secret("ALLOWED_DOMAINS", "")
+    allowed_emails = safe_secret("ALLOWED_EMAILS", "")
     doms = [d.strip().lower() for d in str(allowed_domains).split(",") if d.strip()]
     ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
     return doms, ems
@@ -266,7 +276,7 @@ def _roles_config() -> Dict[str, List[str]]:
     editor = "e@d.com,f@g.com"
     viewer = "h@i.com"
     """
-    r = st.secrets.get("roles", {})
+    r = safe_secret("roles", {})
     if not isinstance(r, Mapping):
         return {"admin": [], "reviewer": [], "editor": [], "viewer": []}
 
@@ -296,7 +306,7 @@ def role_for_email(email: str) -> str:
 def _auth_missing_keys() -> List[str]:
     """Validate Streamlit auth Secrets for Option A (default provider)."""
     try:
-        auth = st.secrets.get("auth")
+        auth = safe_secret("auth")
         if not isinstance(auth, Mapping):
             return ["[auth]"]
 
@@ -327,19 +337,17 @@ def _user_email() -> str:
         return ""
 
 def require_login() -> str:
-    # Cloud Run / Docker deployments: Streamlit built-in auth (st.login) is Streamlit Cloud-only.
-    # For Cloud Run demos, set AUTH_MODE=none (or leave unset) and optionally AUTH_EMAIL to label audit logs.
-    if CLOUD_RUN or str(os.environ.get("AUTH_MODE", "")).lower() in ("none", "off", "disabled"):
-        return (os.environ.get("AUTH_EMAIL") or "").strip()
-
     # If Streamlit auth API isn't available (local / older runtime), don't block.
     if not hasattr(st, "login") or not hasattr(st, "user"):
+        st.caption("Auth disabled (local or unsupported runtime).")
         return ""
 
     missing = _auth_missing_keys()
     if missing:
-        st.warning("Auth is not configured (missing [auth] settings).")
-        st.caption("For Streamlit Community Cloud: set [auth] + [auth.google] in Secrets. For Cloud Run: set AUTH_MODE=none.")
+        st.warning("Auth is not configured correctly in Streamlit Cloud Secrets.")
+        st.caption("Missing:")
+        for k in missing:
+            st.write(f"- {k}")
         return ""  # don't call st.login() if misconfigured
 
     try:
@@ -391,7 +399,7 @@ AUTH_EMAIL = require_login()
 st.session_state.auth_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
 
 # --- OPTIONAL: admin-only role override (testing/dev) ---
-ENABLE_ROLE_SWITCH = DEBUG and (str(st.secrets.get("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes"))
+ENABLE_ROLE_SWITCH = DEBUG and (str(safe_secret("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes"))
 
 locked_role = st.session_state.auth_role
 st.session_state.locked_role = locked_role
@@ -419,7 +427,7 @@ if ENABLE_ROLE_SWITCH and locked_role == "admin":
 # ============================================================
 
 # ============================================================
-# 💼 Client workspaces (multi-tenant namespace)
+# ðŸ’¼ Client workspaces (multi-tenant namespace)
 # ============================================================
 
 def _safe_workspace_key(k: str) -> str:
@@ -439,7 +447,7 @@ def _workspaces_config() -> Dict[str, Dict[str, Any]]:
     clienta  = { name="Client A", domains="clienta.com", emails="" }
     clientb  = { name="Client B", domains="", emails="person@clientb.ca" }
     """
-    ws = st.secrets.get("workspaces", {})
+    ws = safe_secret("workspaces", {})
     if not isinstance(ws, Mapping):
         return {"default": {"name": "Default", "domains": [], "emails": []}}
 
@@ -485,7 +493,7 @@ def scoped_doc_id(doc_id: str, workspace: str) -> str:
 locked_workspace = workspace_for_email(AUTH_EMAIL) if AUTH_EMAIL else "default"
 st.session_state.workspace_locked = locked_workspace
 
-ENABLE_WORKSPACE_SWITCH = str(st.secrets.get("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1", "true", "yes")
+ENABLE_WORKSPACE_SWITCH = str(safe_secret("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1", "true", "yes")
 
 active_workspace = locked_workspace
 if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin":
@@ -528,9 +536,13 @@ def can(action: str) -> bool:
 # ============================================================
 # Gemini client
 # ============================================================
-api_key = st.secrets.get("GEMINI_API_KEY", "")
+# Cloud Run uses environment variables; Streamlit Community Cloud typically uses st.secrets.
+api_key = (os.environ.get("GEMINI_API_KEY") or "").strip() or str(safe_secret("GEMINI_API_KEY", "") or "").strip()
 if not api_key:
-    st.error("❌ GEMINI_API_KEY missing in Streamlit secrets.")
+    if PROD:
+        st.error("❌ GEMINI_API_KEY missing in environment variables.")
+    else:
+        st.error("❌ GEMINI_API_KEY missing in Streamlit secrets.")
     st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -667,7 +679,7 @@ def analytics_export_csv(days: int = 30) -> bytes:
     return out.getvalue().encode("utf-8")
 
 # ============================================================
-# SQLite storage + ✅ Usage Analytics tables
+# SQLite storage + âœ… Usage Analytics tables
 # ============================================================
 def _db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
@@ -1268,7 +1280,7 @@ def sentence_heatmap_html_en(text: str, target: float = 8.0) -> str:
     return "<div style='line-height:1.8'>" + " ".join(spans) + "</div>"
 
 # ============================================================
-# LLM (rate-limit safe + caps BEFORE calling) + ✅ usage logging
+# LLM (rate-limit safe + caps BEFORE calling) + âœ… usage logging
 # ============================================================
 def safe_generate(prompt: str, retries: int = LLM_RETRIES):
     delay = 2
@@ -1444,7 +1456,7 @@ TEXT:
     return best
 
 # ============================================================
-# ✅ Hard-enforce Grade ≤ 8 across sections (auto re-simplify EN)
+# âœ… Hard-enforce Grade ≤ 8 across sections (auto re-simplify EN)
 # ============================================================
 
 def _auto_resimplify_sections_to_grade8(
@@ -1570,7 +1582,7 @@ def build_docx(snapshot: Dict[str, Any]) -> bytes:
     doc = Document()
     doc.add_heading("GovCan Plain Language Converter", 1)
 
-    # ✅ Reliable DOCX "watermark": status banner
+    # âœ… Reliable DOCX "watermark": status banner
     status = overall_doc_status(snapshot)
     banner = doc.add_paragraph(f"STATUS: {status}")
     banner.runs[0].bold = True
@@ -1625,7 +1637,7 @@ def build_pdf(snapshot: Dict[str, Any]) -> bytes:
     c = canvas.Canvas(buff, pagesize=letter)
     width, height = letter
 
-    # ✅ Watermark DRAFT vs APPROVED
+    # âœ… Watermark DRAFT vs APPROVED
     status = overall_doc_status(snapshot)
     pdf_watermark(c, status, width, height)
 
@@ -1829,11 +1841,11 @@ with st.sidebar:
     st.divider()
     doc_id_in = st.text_input("Document ID", value=st.session_state.doc_id, placeholder="e.g., client-abc-001")
 
-    # ✅ FIX: changing document id should not lock extraction cache
+    # âœ… FIX: changing document id should not lock extraction cache
     if doc_id_in != st.session_state.doc_id:
         st.session_state.doc_id = doc_id_in.strip()
         st.session_state.snapshot = None
-        st.session_state.last_extract_key = ""  # ✅ IMPORTANT
+        st.session_state.last_extract_key = ""  # âœ… IMPORTANT
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1881,7 +1893,7 @@ with st.sidebar:
         else:
             st.caption("No versions yet.")
 
-    # ✅ Admin analytics panel (billing info)
+    # âœ… Admin analytics panel (billing info)
     if can("analytics"):
         st.divider()
         st.subheader("Usage Analytics")
@@ -1909,7 +1921,7 @@ with st.sidebar:
             use_container_width=True
         )
 
-        # 🧾 Admin Audit Logs (security trace)
+        # ðŸ§¾ Admin Audit Logs (security trace)
         st.divider()
         st.subheader("Audit Logs")
 
@@ -2016,7 +2028,7 @@ with left:
     meta = st.session_state.extract_meta or {}
     if meta:
         if meta.get("ocr_failed"):
-            st.error("OCR failed ❌ (check tesseract install / language packs)")
+            st.error("OCR failed âŒ (check tesseract install / language packs)")
         elif meta.get("ocr_used"):
             st.success(f"OCR used ✅ — OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | Detected: {meta.get('detected_lang','unknown')}")
         else:
@@ -2107,7 +2119,7 @@ with right:
             "source_text": safe_text,
             "sections": out_sections,
         }
-        # ✅ Hard-enforce Grade ≤ 8 (auto re-simplify English before saving)
+        # âœ… Hard-enforce Grade ≤ 8 (auto re-simplify English before saving)
         doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
 
         out_sections, _fix_report = _auto_resimplify_sections_to_grade8(
@@ -2120,7 +2132,7 @@ with right:
         if _fix_report:
             st.info("Auto-simplified some sections to meet Grade 8 (English).")
             for r in _fix_report[:10]:
-                st.write(f"- {r['title']}: {r['old_grade']:.2f} → {r['new_grade']:.2f} (rounds: {r['rounds']})")
+                st.write(f"- {r['title']}: {r['old_grade']:.2f} â†’ {r['new_grade']:.2f} (rounds: {r['rounds']})")
 
         # Final check: block save if still above 8
         over = [
@@ -2176,7 +2188,7 @@ with right:
     else:
         st.subheader("Reviewer workflow + exports")
 
-        # ✅ GovCan compliance banner: Plain-language target met / not met
+        # âœ… GovCan compliance banner: Plain-language target met / not met
         _all_grades_ok = True
         _worst = 0.0
         try:
@@ -2191,7 +2203,7 @@ with right:
         if _all_grades_ok:
             st.success("✅ Plain-language target met (English Grade ≤ 8 in all sections).")
         else:
-            st.error(f"❌ Plain-language target NOT met (worst section Grade: {_worst:.2f}).")
+            st.error(f"âŒ Plain-language target NOT met (worst section Grade: {_worst:.2f}).")
 
         st.caption(f"Overall document status: **{overall_doc_status(snap)}**")
 
@@ -2264,7 +2276,7 @@ with right:
                 for _s in snap["sections"]:
                     _s["grade_en"] = flesch_kincaid(_s.get("en","") or "")
                     _s["grade_fr"] = french_readability(_s.get("fr","") or "")
-                # ✅ Hard-enforce Grade ≤ 8 (auto re-simplify EN before saving)
+                # âœ… Hard-enforce Grade ≤ 8 (auto re-simplify EN before saving)
                 doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
                 snap["sections"], _fix_report2 = _auto_resimplify_sections_to_grade8(
                     snap["sections"],
@@ -2349,6 +2361,5 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
-
 
 
