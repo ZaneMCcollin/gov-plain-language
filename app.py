@@ -15,8 +15,8 @@
 # - Streamlit Cloud ready (no fixed port in config.toml; Docker uses $PORT)
 # - Watermark: DRAFT vs APPROVED on PDFs + status banner on DOCX
 # - Compliance Report export (PDF summary)
-# - âœ… Auth: Streamlit built-in login (Google/OIDC) + domain/email allowlist
-# - âœ… Usage analytics: per-user events for billing insight + admin CSV export
+# - ✅ Auth: Streamlit built-in login (Google/OIDC) + domain/email allowlist
+# - ✅ Usage analytics: per-user events for billing insight + admin CSV export
 # ============================================================
 
 import os
@@ -28,17 +28,14 @@ import csv
 import hashlib
 import sqlite3
 import sys
-
-# Optional: Postgres / Cloud SQL (DATABASE_URL)
-try:
-    import psycopg2  # type: ignore
-except Exception:
-    psycopg2 = None  # type: ignore
-
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
+
+
+# Hosting detection
+CLOUD_RUN = bool(os.environ.get(\"K_SERVICE\") or os.environ.get(\"CLOUD_RUN\"))
 
 from google import genai
 from google.genai.errors import ClientError
@@ -79,8 +76,8 @@ def _write_if_missing(path: str, content: str) -> None:
         f.write(content)
 
 def _bootstrap_project_files() -> None:
-    # âœ… Pin Streamlit new enough to support st.login / st.user
-    # âœ… Authlib required for Google auth on Streamlit Community Cloud
+    # ✅ Pin Streamlit new enough to support st.login / st.user
+    # ✅ Authlib required for Google auth on Streamlit Community Cloud
     _write_if_missing(
         "requirements.txt",
         "\n".join([
@@ -145,7 +142,7 @@ def _bootstrap_project_files() -> None:
         ])
     )
 
-    # âœ… Streamlit Cloud friendly: do NOT pin port/address here
+    # ✅ Streamlit Cloud friendly: do NOT pin port/address here
     os.makedirs(".streamlit", exist_ok=True)
     _write_if_missing(
         ".streamlit/config.toml",
@@ -161,7 +158,7 @@ def _bootstrap_project_files() -> None:
         ])
     )
 
-    # âœ… Minimal unit tests (stdlib unittest; no extra deps)
+    # ✅ Minimal unit tests (stdlib unittest; no extra deps)
     _write_if_missing(
         os.path.join("tests", "test_grading.py"),
         "\n".join([
@@ -215,19 +212,8 @@ OCR_MED_CONF = int(os.environ.get("OCR_MED_CONF", "80"))
 
 BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
 
-# ------------------------------------------------------------
-# Secrets helper (Cloud Run-safe)
-# ------------------------------------------------------------
-def safe_secret(key: str, default=None):
-    """Safely read Streamlit secrets without crashing when secrets.toml is absent (e.g., on Cloud Run)."""
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
-
 # Debug / dev toggles
-PROD = str(os.environ.get("PROD", "") or str(safe_secret("PROD", "false"))).lower() in ("1","true","yes")
-DEBUG = (not PROD) and (str(os.environ.get("DEBUG", "")).lower() in ("1","true","yes") or str(safe_secret("DEBUG", "false")).lower() in ("1","true","yes"))
+DEBUG = str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes") or str(st.secrets.get("DEBUG", "false")).lower() in ("1", "true", "yes")
 
 # ============================================================
 # Page config
@@ -246,15 +232,15 @@ if _is_streamlit_cloud():
 
 # ============================================================
 # ============================================================
-# âœ… Authentication + Allow-lists + Locked roles (from Secrets)
+# ✅ Authentication + Allow-lists + Locked roles (from Secrets)
 # ============================================================
 
 from collections.abc import Mapping
 
 def _get_allowlists() -> Tuple[List[str], List[str]]:
     """Read allow-lists from Secrets (comma-separated strings)."""
-    allowed_domains = safe_secret("ALLOWED_DOMAINS", "")
-    allowed_emails = safe_secret("ALLOWED_EMAILS", "")
+    allowed_domains = st.secrets.get("ALLOWED_DOMAINS", "")
+    allowed_emails = st.secrets.get("ALLOWED_EMAILS", "")
     doms = [d.strip().lower() for d in str(allowed_domains).split(",") if d.strip()]
     ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
     return doms, ems
@@ -278,7 +264,7 @@ def _roles_config() -> Dict[str, List[str]]:
     editor = "e@d.com,f@g.com"
     viewer = "h@i.com"
     """
-    r = safe_secret("roles", {})
+    r = st.secrets.get("roles", {})
     if not isinstance(r, Mapping):
         return {"admin": [], "reviewer": [], "editor": [], "viewer": []}
 
@@ -308,7 +294,7 @@ def role_for_email(email: str) -> str:
 def _auth_missing_keys() -> List[str]:
     """Validate Streamlit auth Secrets for Option A (default provider)."""
     try:
-        auth = safe_secret("auth")
+        auth = st.secrets.get("auth")
         if not isinstance(auth, Mapping):
             return ["[auth]"]
 
@@ -339,17 +325,19 @@ def _user_email() -> str:
         return ""
 
 def require_login() -> str:
+    # Cloud Run / Docker deployments: Streamlit built-in auth (st.login) is Streamlit Cloud-only.
+    # For Cloud Run demos, set AUTH_MODE=none (or leave unset) and optionally AUTH_EMAIL to label audit logs.
+    if CLOUD_RUN or str(os.environ.get("AUTH_MODE", "")).lower() in ("none", "off", "disabled"):
+        return (os.environ.get("AUTH_EMAIL") or "").strip()
+
     # If Streamlit auth API isn't available (local / older runtime), don't block.
     if not hasattr(st, "login") or not hasattr(st, "user"):
-        st.caption("Auth disabled (local or unsupported runtime).")
         return ""
 
     missing = _auth_missing_keys()
     if missing:
-        st.warning("Auth is not configured correctly in Streamlit Cloud Secrets.")
-        st.caption("Missing:")
-        for k in missing:
-            st.write(f"- {k}")
+        st.warning("Auth is not configured (missing [auth] settings).")
+        st.caption("For Streamlit Community Cloud: set [auth] + [auth.google] in Secrets. For Cloud Run: set AUTH_MODE=none.")
         return ""  # don't call st.login() if misconfigured
 
     try:
@@ -401,7 +389,7 @@ AUTH_EMAIL = require_login()
 st.session_state.auth_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
 
 # --- OPTIONAL: admin-only role override (testing/dev) ---
-ENABLE_ROLE_SWITCH = (not PROD) and DEBUG and (str(safe_secret("ENABLE_ROLE_SWITCH", "false")).lower() in ("1","true","yes"))
+ENABLE_ROLE_SWITCH = DEBUG and (str(st.secrets.get("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes"))
 
 locked_role = st.session_state.auth_role
 st.session_state.locked_role = locked_role
@@ -429,7 +417,7 @@ if ENABLE_ROLE_SWITCH and locked_role == "admin":
 # ============================================================
 
 # ============================================================
-# ðŸ’¼ Client workspaces (multi-tenant namespace)
+# 💼 Client workspaces (multi-tenant namespace)
 # ============================================================
 
 def _safe_workspace_key(k: str) -> str:
@@ -449,7 +437,7 @@ def _workspaces_config() -> Dict[str, Dict[str, Any]]:
     clienta  = { name="Client A", domains="clienta.com", emails="" }
     clientb  = { name="Client B", domains="", emails="person@clientb.ca" }
     """
-    ws = safe_secret("workspaces", {})
+    ws = st.secrets.get("workspaces", {})
     if not isinstance(ws, Mapping):
         return {"default": {"name": "Default", "domains": [], "emails": []}}
 
@@ -495,7 +483,7 @@ def scoped_doc_id(doc_id: str, workspace: str) -> str:
 locked_workspace = workspace_for_email(AUTH_EMAIL) if AUTH_EMAIL else "default"
 st.session_state.workspace_locked = locked_workspace
 
-ENABLE_WORKSPACE_SWITCH = (not PROD) and (str(safe_secret("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1","true","yes"))
+ENABLE_WORKSPACE_SWITCH = str(st.secrets.get("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1", "true", "yes")
 
 active_workspace = locked_workspace
 if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin":
@@ -538,9 +526,9 @@ def can(action: str) -> bool:
 # ============================================================
 # Gemini client
 # ============================================================
-api_key = os.environ.get("GEMINI_API_KEY", "") or str(safe_secret("GEMINI_API_KEY", "") or "")
+api_key = st.secrets.get("GEMINI_API_KEY", "")
 if not api_key:
-    st.error("âŒ GEMINI_API_KEY missing in Streamlit secrets.")
+    st.error("❌ GEMINI_API_KEY missing in Streamlit secrets.")
     st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -567,92 +555,6 @@ def truncate_words(text: str, max_words: int) -> Tuple[str, bool]:
     if len(words) <= max_words:
         return text, False
     return " ".join(words[:max_words]), True
-
-
-def chunk_words(text: str, max_words: int) -> List[str]:
-    """Split text into chunks of up to max_words (best-effort)."""
-    words = (text or "").split()
-    if not words:
-        return []
-    out: List[str] = []
-    for i in range(0, len(words), max(1, int(max_words))):
-        out.append(" ".join(words[i:i + max_words]))
-    return out
-
-def _targeted_simplify_en(en_text: str, target_grade: float, doc_id: str, section_id: int, user_email: str, max_rounds: int = 3) -> Tuple[str, float, int]:
-    """Try to lower the grade by rewriting only the hardest sentences first."""
-    best_text = (en_text or "").strip()
-    best_grade = flesch_kincaid(best_text) if best_text else 99.0
-    rounds = 0
-    if not best_text:
-        return best_text, best_grade, rounds
-
-    for _ in range(max_rounds):
-        if best_grade <= target_grade:
-            break
-        rounds += 1
-
-        worst = worst_sentences_en(best_text, top_n=6)
-        worst_sents = [w.get("sentence", "") for w in worst if (w.get("sentence", "") or "").strip()]
-        if not worst_sents:
-            break
-
-        prompt = f"""
-Rewrite ONLY the sentences below into simpler English so the passage reaches Grade {int(target_grade)} or lower.
-Rules:
-- Keep meaning.
-- Use shorter sentences.
-- Use common words.
-Return JSON ONLY: {{ "rewrites": [{{"from":"...","to":"..."}}, ...] }}
-
-SENTENCES (as an array):
-{json.dumps(worst_sents, ensure_ascii=False)}
-"""
-        resp = safe_generate(prompt)
-        raw_out = getattr(resp, "text", "") if resp else ""
-        log_usage(
-            action="llm_targeted_simplify_en",
-            user_email=user_email,
-            doc_id=doc_id,
-            section_id=section_id,
-            model=LLM_MODEL,
-            prompt_text=prompt,
-            output_text=raw_out,
-            meta={"round": rounds, "target_grade": target_grade},
-        )
-
-        rewrites = []
-        try:
-            mm = re.search(r"\{.*\}", raw_out, re.S)
-            if mm:
-                data = json.loads(mm.group())
-                rewrites = data.get("rewrites") or []
-        except Exception:
-            rewrites = []
-
-        new_text = best_text
-        applied = 0
-        if isinstance(rewrites, list):
-            for rr in rewrites:
-                if not isinstance(rr, dict):
-                    continue
-                frm = (rr.get("from") or "").strip()
-                to = (rr.get("to") or "").strip()
-                if frm and to and frm in new_text:
-                    new_text = new_text.replace(frm, to)
-                    applied += 1
-
-        if applied == 0:
-            break
-
-        g = flesch_kincaid(new_text)
-        if g < best_grade:
-            best_text, best_grade = new_text, g
-        else:
-            if len(new_text) < len(best_text) and g <= best_grade + 0.2:
-                best_text, best_grade = new_text, g
-
-    return best_text, best_grade, rounds
 
 def safe_filename(name: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9._-]+", "_", name).strip("_")
@@ -763,143 +665,17 @@ def analytics_export_csv(days: int = 30) -> bytes:
     return out.getvalue().encode("utf-8")
 
 # ============================================================
-# SQLite storage + âœ… Usage Analytics tables
+# SQLite storage + ✅ Usage Analytics tables
 # ============================================================
-def _pg_enabled() -> bool:
-    return bool(os.environ.get("DATABASE_URL") or safe_secret("DATABASE_URL", ""))
-
-DB_KIND = "postgres" if _pg_enabled() else "sqlite"
-
-class _CursorProxy:
-    def __init__(self, cur, kind: str):
-        self._cur = cur
-        self._kind = kind
-
-    def _adapt_sql(self, sql: str) -> str:
-        if self._kind != "postgres":
-            return sql
-        return sql.replace("?", "%s")
-
-    def execute(self, sql: str, params=()):
-        self._cur.execute(self._adapt_sql(sql), params or ())
-        return self
-
-    def fetchone(self):
-        return self._cur.fetchone()
-
-    def fetchall(self):
-        return self._cur.fetchall()
-
-    @property
-    def lastrowid(self):
-        return getattr(self._cur, "lastrowid", None)
-
-class _ConnProxy:
-    def __init__(self, conn, kind: str):
-        self._conn = conn
-        self._kind = kind
-
-    def cursor(self):
-        return _CursorProxy(self._conn.cursor(), self._kind)
-
-    def execute(self, sql: str, params=()):
-        cur = self.cursor()
-        cur.execute(sql, params or ())
-        return cur
-
-    def commit(self):
-        return self._conn.commit()
-
-    def close(self):
-        return self._conn.close()
-
-def _db():
-    """DB connection:
-    - SQLite by default
-    - Postgres when DATABASE_URL is set (Cloud SQL ready)
-    """
-    if DB_KIND == "postgres":
-        if psycopg2 is None:
-            st.error("Postgres mode requested but psycopg2 is not installed. Add psycopg2-binary to requirements.txt.")
-            st.stop()
-        dsn = os.environ.get("DATABASE_URL") or str(safe_secret("DATABASE_URL", "") or "")
-        if not dsn:
-            st.error("DATABASE_URL missing for Postgres mode.")
-            st.stop()
-        return _ConnProxy(psycopg2.connect(dsn), "postgres")
-
+def _db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    return _ConnProxy(conn, "sqlite")
+    return conn
 
 def _db_init() -> None:
     conn = _db()
-
-    if DB_KIND == "postgres":
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                doc_id TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                latest_version_id INTEGER
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS versions (
-                id SERIAL PRIMARY KEY,
-                doc_id TEXT NOT NULL,
-                version_name TEXT NOT NULL,
-                saved_at TEXT NOT NULL,
-                snapshot_json TEXT NOT NULL
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_versions_doc ON versions(doc_id, id DESC)")
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS usage_events (
-                id SERIAL PRIMARY KEY,
-                ts TEXT NOT NULL,
-                user_email TEXT,
-                action TEXT NOT NULL,
-                doc_id TEXT,
-                section_id INTEGER,
-                model TEXT,
-                prompt_chars INTEGER,
-                output_chars INTEGER,
-                est_tokens_in INTEGER,
-                est_tokens_out INTEGER,
-                meta_json TEXT
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(user_email, ts DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_doc ON usage_events(doc_id, ts DESC)")
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS audit_logs (
-                id SERIAL PRIMARY KEY,
-                ts TEXT NOT NULL,
-                user_email TEXT,
-                role TEXT,
-                event TEXT NOT NULL,
-                workspace TEXT,
-                doc_id TEXT,
-                meta_json TEXT
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_email, ts DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_role ON audit_logs(role, ts DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ws ON audit_logs(workspace, ts DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_doc ON audit_logs(doc_id, ts DESC)")
-
-        conn.commit()
-        conn.close()
-        return
-
-    # SQLite schema (existing)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS documents (
             doc_id TEXT PRIMARY KEY,
@@ -940,6 +716,7 @@ def _db_init() -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(user_email, ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_doc ON usage_events(doc_id, ts DESC)")
 
+    # Audit logs (security + traceability)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -966,7 +743,6 @@ def _db_init() -> None:
             conn.commit()
     except Exception:
         pass
-
     conn.commit()
     conn.close()
 
@@ -1063,18 +839,11 @@ def save_version(doc_id: str, snapshot: Dict[str, Any]) -> str:
     raw = json.dumps(snapshot, ensure_ascii=False)
     conn = _db()
     cur = conn.cursor()
-    if DB_KIND == "postgres":
-        cur.execute(
-            "INSERT INTO versions(doc_id, version_name, saved_at, snapshot_json) VALUES(%s,%s,%s,%s) RETURNING id",
-            (doc_id, version_name, saved_at, raw),
-        )
-        vid = (cur.fetchone() or [None])[0]
-    else:
-        cur.execute(
-            "INSERT INTO versions(doc_id, version_name, saved_at, snapshot_json) VALUES(?,?,?,?)",
-            (doc_id, version_name, saved_at, raw),
-        )
-        vid = cur.lastrowid
+    cur.execute(
+        "INSERT INTO versions(doc_id, version_name, saved_at, snapshot_json) VALUES(?,?,?,?)",
+        (doc_id, version_name, saved_at, raw),
+    )
+    vid = cur.lastrowid
     cur.execute(
         "UPDATE documents SET updated_at = ?, latest_version_id = ? WHERE doc_id = ?",
         (now_iso(), vid, doc_id),
@@ -1497,7 +1266,7 @@ def sentence_heatmap_html_en(text: str, target: float = 8.0) -> str:
     return "<div style='line-height:1.8'>" + " ".join(spans) + "</div>"
 
 # ============================================================
-# LLM (rate-limit safe + caps BEFORE calling) + âœ… usage logging
+# LLM (rate-limit safe + caps BEFORE calling) + ✅ usage logging
 # ============================================================
 def safe_generate(prompt: str, retries: int = LLM_RETRIES):
     delay = 2
@@ -1522,20 +1291,6 @@ def _reprompt_english_to_target(en_text: str, target_grade: float, doc_id: str, 
     best_grade = flesch_kincaid(best_text) if best_text else 99.0
     rounds = 0
     if not best_text:
-        # If we still missed target, try a targeted pass on the hardest sentences.
-        if best_text and best_grade > target_grade:
-            t_text, t_grade, t_rounds = _targeted_simplify_en(
-                best_text,
-                target_grade=target_grade,
-                doc_id=doc_id,
-                section_id=section_id,
-                user_email=user_email,
-                max_rounds=3,
-            )
-            rounds += int(t_rounds)
-            if t_grade < best_grade:
-                best_text, best_grade = t_text, t_grade
-
         return best_text, best_grade, rounds
 
     for _ in range(max_rounds):
@@ -1687,7 +1442,7 @@ TEXT:
     return best
 
 # ============================================================
-# âœ… Hard-enforce Grade ≤ 8 across sections (auto re-simplify EN)
+# ✅ Hard-enforce Grade ≤ 8 across sections (auto re-simplify EN)
 # ============================================================
 
 def _auto_resimplify_sections_to_grade8(
@@ -1813,7 +1568,7 @@ def build_docx(snapshot: Dict[str, Any]) -> bytes:
     doc = Document()
     doc.add_heading("GovCan Plain Language Converter", 1)
 
-    # âœ… Reliable DOCX "watermark": status banner
+    # ✅ Reliable DOCX "watermark": status banner
     status = overall_doc_status(snapshot)
     banner = doc.add_paragraph(f"STATUS: {status}")
     banner.runs[0].bold = True
@@ -1868,7 +1623,7 @@ def build_pdf(snapshot: Dict[str, Any]) -> bytes:
     c = canvas.Canvas(buff, pagesize=letter)
     width, height = letter
 
-    # âœ… Watermark DRAFT vs APPROVED
+    # ✅ Watermark DRAFT vs APPROVED
     status = overall_doc_status(snapshot)
     pdf_watermark(c, status, width, height)
 
@@ -1987,10 +1742,6 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     c.setFont("Helvetica", 11)
 
     lines = [
-        "Purpose: Audit-friendly plain-language + accessibility evidence snapshot.",
-        "Framing: Supports WCAG 'Understandable' guidance and Government of Canada plain-language best practices.",
-        "Note: Informational only (not legal advice).",
-        "",
         "Target: English readability at Grade 8 or below (Flesch–Kincaid).",
         "Interpretation: Sections marked OVER exceed target and should be revised.",
         "",
@@ -2061,8 +1812,6 @@ with st.sidebar:
     st.header("Controls")
     st.caption("Role (locked from Secrets)")
     st.write(f"**{st.session_state.get('auth_role','viewer')}**")
-    if PROD:
-        st.warning("PRODUCTION MODE: overrides disabled", icon="🔒")
     if AUTH_EMAIL:
         st.caption(f"Signed in as: {AUTH_EMAIL}")
     st.caption(f"Workspace (active): {st.session_state.get('workspace', 'default')}")
@@ -2078,11 +1827,11 @@ with st.sidebar:
     st.divider()
     doc_id_in = st.text_input("Document ID", value=st.session_state.doc_id, placeholder="e.g., client-abc-001")
 
-    # âœ… FIX: changing document id should not lock extraction cache
+    # ✅ FIX: changing document id should not lock extraction cache
     if doc_id_in != st.session_state.doc_id:
         st.session_state.doc_id = doc_id_in.strip()
         st.session_state.snapshot = None
-        st.session_state.last_extract_key = ""  # âœ… IMPORTANT
+        st.session_state.last_extract_key = ""  # ✅ IMPORTANT
 
     c1, c2 = st.columns(2)
     with c1:
@@ -2130,7 +1879,7 @@ with st.sidebar:
         else:
             st.caption("No versions yet.")
 
-    # âœ… Admin analytics panel (billing info)
+    # ✅ Admin analytics panel (billing info)
     if can("analytics"):
         st.divider()
         st.subheader("Usage Analytics")
@@ -2158,7 +1907,7 @@ with st.sidebar:
             use_container_width=True
         )
 
-        # ðŸ§¾ Admin Audit Logs (security trace)
+        # 🧾 Admin Audit Logs (security trace)
         st.divider()
         st.subheader("Audit Logs")
 
@@ -2265,7 +2014,7 @@ with left:
     meta = st.session_state.extract_meta or {}
     if meta:
         if meta.get("ocr_failed"):
-            st.error("OCR failed âŒ (check tesseract install / language packs)")
+            st.error("OCR failed ❌ (check tesseract install / language packs)")
         elif meta.get("ocr_used"):
             st.success(f"OCR used ✅ — OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | Detected: {meta.get('detected_lang','unknown')}")
         else:
@@ -2317,16 +2066,7 @@ with right:
         st.session_state.extract_meta = st.session_state.extract_meta or {}
         st.session_state.extract_meta["detected_lang"] = st.session_state.extract_meta.get("detected_lang") or doc_lang
 
-        chunks0 = split_by_headings(safe_text)
-        # If any section is huge, split it into smaller parts so we don't lose content.
-        chunks: List[Tuple[str, str]] = []
-        for (t, b) in chunks0:
-            if word_count(b) > MAX_CHUNK_WORDS:
-                parts = chunk_words(b, MAX_CHUNK_WORDS)
-                for pi, pb in enumerate(parts, start=1):
-                    chunks.append((f"{t} (part {pi}/{len(parts)})", pb))
-            else:
-                chunks.append((t, b))
+        chunks = split_by_headings(safe_text)
 
         out_sections: List[Dict[str, Any]] = []
         prog = st.progress(0)
@@ -2365,7 +2105,7 @@ with right:
             "source_text": safe_text,
             "sections": out_sections,
         }
-        # âœ… Hard-enforce Grade ≤ 8 (auto re-simplify English before saving)
+        # ✅ Hard-enforce Grade ≤ 8 (auto re-simplify English before saving)
         doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
 
         out_sections, _fix_report = _auto_resimplify_sections_to_grade8(
@@ -2378,7 +2118,7 @@ with right:
         if _fix_report:
             st.info("Auto-simplified some sections to meet Grade 8 (English).")
             for r in _fix_report[:10]:
-                st.write(f"- {r['title']}: {r['old_grade']:.2f} â†’ {r['new_grade']:.2f} (rounds: {r['rounds']})")
+                st.write(f"- {r['title']}: {r['old_grade']:.2f} → {r['new_grade']:.2f} (rounds: {r['rounds']})")
 
         # Final check: block save if still above 8
         over = [
@@ -2434,7 +2174,7 @@ with right:
     else:
         st.subheader("Reviewer workflow + exports")
 
-        # âœ… GovCan compliance banner: Plain-language target met / not met
+        # ✅ GovCan compliance banner: Plain-language target met / not met
         _all_grades_ok = True
         _worst = 0.0
         try:
@@ -2449,7 +2189,7 @@ with right:
         if _all_grades_ok:
             st.success("✅ Plain-language target met (English Grade ≤ 8 in all sections).")
         else:
-            st.error(f"âŒ Plain-language target NOT met (worst section Grade: {_worst:.2f}).")
+            st.error(f"❌ Plain-language target NOT met (worst section Grade: {_worst:.2f}).")
 
         st.caption(f"Overall document status: **{overall_doc_status(snap)}**")
 
@@ -2522,7 +2262,7 @@ with right:
                 for _s in snap["sections"]:
                     _s["grade_en"] = flesch_kincaid(_s.get("en","") or "")
                     _s["grade_fr"] = french_readability(_s.get("fr","") or "")
-                # âœ… Hard-enforce Grade ≤ 8 (auto re-simplify EN before saving)
+                # ✅ Hard-enforce Grade ≤ 8 (auto re-simplify EN before saving)
                 doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
                 snap["sections"], _fix_report2 = _auto_resimplify_sections_to_grade8(
                     snap["sections"],
@@ -2607,4 +2347,6 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
+
+
 
