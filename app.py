@@ -1,5 +1,5 @@
 # ============================================================
-# GovCan Plain Language Converter â€” ONE-FILE ENTERPRISE BUILD
+# GovCan Plain Language Converter — ONE-FILE ENTERPRISE BUILD
 # (Cloud Run + SQLite + Reviewer workflow + Versioning + DOCX/PDF + OCR + Limits + Lang detect + OCR confidence)
 #
 # This single app.py:
@@ -215,7 +215,7 @@ DEBUG = str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes") or str(
 # Page config
 # ============================================================
 st.set_page_config(page_title="GovCan Plain Language Converter", layout="wide")
-st.title("ðŸ‡¨ðŸ‡¦ GovCan Plain Language Converter")
+st.title("🇨🇦 GovCan Plain Language Converter")
 
 # ============================================================
 # Hosted-mode warning (Streamlit Cloud demo: disk persistence not guaranteed)
@@ -1133,7 +1133,7 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
 # ============================================================
 # Readability scoring (no external deps)
 # ============================================================
-_VOWELS = "aeiouyÃ Ã¢Ã¤Ã¦Ã§Ã©Ã¨ÃªÃ«Ã®Ã¯Ã´Ã¶Å“Ã¹Ã»Ã¼Ã¿"
+_VOWELS = "aeiouyàâäæçéèêëîïôöœùûüÿ"
 
 def _count_sentences(text: str) -> int:
     # Rough sentence split on ., !, ?, ; and newlines.
@@ -1149,21 +1149,25 @@ def _count_words(text: str) -> int:
     Avoids fragile mojibake character ranges that can raise re.PatternError.
     Matches sequences of Unicode letters (no digits/underscore), with optional apostrophe part.
     """
+
     if not text:
         return 1
     words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", text, flags=re.UNICODE)
     return max(1, len(words))
-
 
 def _count_syllables_word(word: str) -> int:
     """Heuristic syllable counter that is Unicode-safe."""
     w = (word or "").lower()
     if not w:
         return 1
+
+    # Keep only letters (drops punctuation/digits safely, keeps accented letters)
     w = "".join(ch for ch in w if ch.isalpha())
     if not w:
         return 1
+
     vowels = set("aeiouyàâäæéèêëîïôöœùûüÿ")
+
     syl = 0
     prev_vowel = False
     for ch in w:
@@ -1171,10 +1175,12 @@ def _count_syllables_word(word: str) -> int:
         if is_v and not prev_vowel:
             syl += 1
         prev_vowel = is_v
+
+    # Basic silent-e handling for English
     if w.endswith("e") and not w.endswith(("le", "ye")) and syl > 1:
         syl -= 1
-    return max(1, syl)
 
+    return max(1, syl)
 
 def _count_syllables(text: str) -> int:
     if not text:
@@ -1182,9 +1188,8 @@ def _count_syllables(text: str) -> int:
     words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", text, flags=re.UNICODE)
     return sum(_count_syllables_word(w) for w in words) or 1
 
-
 def flesch_kincaid(text: str) -> float:
-    """Fleschâ€“Kincaid Grade Level (English). Lower is easier."""
+    """Flesch–Kincaid Grade Level (English). Lower is easier."""
     words = _count_words(text)
     sentences = _count_sentences(text)
     syllables = _count_syllables(text)
@@ -1288,7 +1293,7 @@ def _reprompt_english_to_target(en_text: str, target_grade: float, doc_id: str, 
 
         rounds += 1
         prompt = f"""
-Rewrite the ENGLISH text below into plain language at Grade {int(target_grade)} or lower (Fleschâ€“Kincaid).
+Rewrite the ENGLISH text below into plain language at Grade {int(target_grade)} or lower (Flesch–Kincaid).
 Rules:
 - Keep the same meaning.
 - Use short sentences.
@@ -1356,7 +1361,7 @@ def convert_chunk(text: str, source_lang: str, doc_id: str, section_id: int, use
 Return JSON ONLY: {{ "en": "...", "fr": "..." }}
 
 Rules:
-- English Grade â‰¤ 8 (hard target)
+- English Grade ≤ 8 (hard target)
 - Short sentences. Active voice.
 - Explain terms.
 - EN and FR must match meaning.
@@ -1431,7 +1436,7 @@ TEXT:
     return best
 
 # ============================================================
-# âœ… Hard-enforce Grade â‰¤ 8 across sections (auto re-simplify EN)
+# âœ… Hard-enforce Grade ≤ 8 across sections (auto re-simplify EN)
 # ============================================================
 
 def _auto_resimplify_sections_to_grade8(
@@ -1593,7 +1598,7 @@ def build_docx(snapshot: Dict[str, Any]) -> bytes:
         doc.add_paragraph("English (Plain Language)").runs[0].bold = True
         doc.add_paragraph(s.get("en", ""))
 
-        doc.add_paragraph("FranÃ§ais (Langage clair)").runs[0].bold = True
+        doc.add_paragraph("Français (Langage clair)").runs[0].bold = True
         doc.add_paragraph(s.get("fr", ""))
 
         doc.add_paragraph(f"EN Grade: {s.get('grade_en','')} | FR Readability: {s.get('grade_fr','')}")
@@ -1684,7 +1689,7 @@ def build_pdf(snapshot: Dict[str, Any]) -> bytes:
 
         y -= 6
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(1 * inch, y, "FranÃ§ais (Langage clair)")
+        c.drawString(1 * inch, y, "Français (Langage clair)")
         y -= 12
         c.setFont("Helvetica", 9)
         y = draw_wrapped(s.get("fr", ""), 1*inch, y, width - 2*inch, leading=11)
@@ -1713,7 +1718,7 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
 
     y = height - 1 * inch
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(1 * inch, y, "Compliance Report â€” GovCan Plain Language Converter")
+    c.drawString(1 * inch, y, "Compliance Report — GovCan Plain Language Converter")
     y -= 22
 
     c.setFont("Helvetica", 11)
@@ -1731,7 +1736,7 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
     c.setFont("Helvetica", 11)
 
     lines = [
-        "Target: English readability at Grade 8 or below (Fleschâ€“Kincaid).",
+        "Target: English readability at Grade 8 or below (Flesch–Kincaid).",
         "Interpretation: Sections marked OVER exceed target and should be revised.",
         "",
         f"Sections total: {stats['total_sections']}",
@@ -1740,7 +1745,7 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
         f"Sections truncated before LLM call: {stats['truncated_sections']}",
         f"Detected language: {stats['detected_lang']} | Pages requested: {stats['pages_requested']}",
         f"OCR used: {stats['ocr_used']} | OCR failed: {stats['ocr_failed']}",
-        f"Reviewers: {', '.join(stats['reviewers']) if stats['reviewers'] else 'â€”'}",
+        f"Reviewers: {', '.join(stats['reviewers']) if stats['reviewers'] else '—'}",
     ]
     if stats["ocr_used"]:
         lines.append("Note: OCR text quality may affect readability scores and translation accuracy.")
@@ -1811,7 +1816,7 @@ with st.sidebar:
 
     st.divider()
     st.caption("Storage mode")
-    st.success(f"SQLite âœ… ({SQLITE_PATH})")
+    st.success(f"SQLite ✅ ({SQLITE_PATH})")
 
     st.divider()
     doc_id_in = st.text_input("Document ID", value=st.session_state.doc_id, placeholder="e.g., client-abc-001")
@@ -2005,9 +2010,9 @@ with left:
         if meta.get("ocr_failed"):
             st.error("OCR failed âŒ (check tesseract install / language packs)")
         elif meta.get("ocr_used"):
-            st.success(f"OCR used âœ… â€” OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | Detected: {meta.get('detected_lang','unknown')}")
+            st.success(f"OCR used ✅ — OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | Detected: {meta.get('detected_lang','unknown')}")
         else:
-            st.info(f"Native extraction used âœ… â€” Detected: {meta.get('detected_lang','unknown')}")
+            st.info(f"Native extraction used ✅ — Detected: {meta.get('detected_lang','unknown')}")
 
         if meta.get("doc_truncated"):
             st.warning(f"Input capped at {MAX_DOC_CHARS} characters before LLM calls.")
@@ -2094,7 +2099,7 @@ with right:
             "source_text": safe_text,
             "sections": out_sections,
         }
-        # âœ… Hard-enforce Grade â‰¤ 8 (auto re-simplify English before saving)
+        # âœ… Hard-enforce Grade ≤ 8 (auto re-simplify English before saving)
         doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
 
         out_sections, _fix_report = _auto_resimplify_sections_to_grade8(
@@ -2117,34 +2122,21 @@ with right:
         ]
         if over:
             over_sorted = sorted(over, key=lambda x: x[1], reverse=True)[:10]
-
-            # In production we block saving when strict enforcement is on.
-            # For admin/testing, allow saving as DRAFT but warn loudly.
-            strict = bool(st.session_state.get("STRICT_GRADE_ENFORCE", True))
-            allow_override = bool(DEBUG) or (st.session_state.get("auth_role") == "admin") or bool(st.session_state.get("workspace_override_testing"))
-
-            if strict and not allow_override:
-                st.error("Grade enforcement failed for one or more sections (must be Grade 8 or below).")
-                st.write("Worst sections:")
-                for t, g in over_sorted:
-                    st.write(f"- {t}: {g:.2f}")
-                # Keep snapshot in-memory so user can edit, but do NOT save a version
-                snap["sections"] = out_sections
-                st.session_state.snapshot = snap
-                log_audit(
-                    event="convert_failed_grade",
-                    user_email=AUTH_EMAIL,
-                    workspace=st.session_state.workspace,
-                    doc_id=st.session_state.doc_id,
-                    meta={"over": over_sorted},
-                )
-                st.stop()
-            else:
-                st.warning("Grade 8 target NOT met for one or more sections — saving as DRAFT (admin/testing override).")
-                st.write("Worst sections:")
-                for t, g in over_sorted:
-                    st.write(f"- {t}: {g:.2f}")
-                snap["grade_gate_failed"] = True
+            st.error("Grade enforcement failed for one or more sections (must be Grade 8 or below).")
+            st.write("Worst sections:")
+            for t, g in over_sorted:
+                st.write(f"- {t}: {g:.2f}")
+            # Keep snapshot in-memory so user can edit, but do NOT save a version
+            snap["sections"] = out_sections
+            st.session_state.snapshot = snap
+            log_audit(
+                event="convert_failed_grade",
+                user_email=AUTH_EMAIL,
+                workspace=st.session_state.workspace,
+                doc_id=st.session_state.doc_id,
+                meta={"over": over_sorted},
+            )
+            st.stop()
 
         snap["sections"] = out_sections
         save_version(doc_id_sc, snap)
@@ -2168,7 +2160,7 @@ with right:
             doc_id=st.session_state.doc_id,
             meta={"sections": len(out_sections)},
         )
-        st.success("Saved âœ… (SQLite versioned; approvals/comments persist)")
+        st.success("Saved ✅ (SQLite versioned; approvals/comments persist)")
 
     snap = st.session_state.snapshot
     if not snap:
@@ -2189,7 +2181,7 @@ with right:
             _all_grades_ok = False
 
         if _all_grades_ok:
-            st.success("âœ… Plain-language target met (English Grade â‰¤ 8 in all sections).")
+            st.success("✅ Plain-language target met (English Grade ≤ 8 in all sections).")
         else:
             st.error(f"âŒ Plain-language target NOT met (worst section Grade: {_worst:.2f}).")
 
@@ -2201,7 +2193,7 @@ with right:
 
             ge = float(s.get("grade_en", 99.0) or 99.0)
             if ge <= 8:
-                st.success(f"EN Grade {ge} âœ”")
+                st.success(f"EN Grade {ge} ✔")
             else:
                 st.warning(f"EN Grade {ge} (above 8)")
 
@@ -2233,7 +2225,7 @@ with right:
             else:
                 st.markdown("### English")
                 st.write(s.get("en", ""))
-                st.markdown("### FranÃ§ais")
+                st.markdown("### Français")
                 st.write(s.get("fr", ""))
 
             if can("approve"):
@@ -2264,7 +2256,7 @@ with right:
                 for _s in snap["sections"]:
                     _s["grade_en"] = flesch_kincaid(_s.get("en","") or "")
                     _s["grade_fr"] = french_readability(_s.get("fr","") or "")
-                # âœ… Hard-enforce Grade â‰¤ 8 (auto re-simplify EN before saving)
+                # âœ… Hard-enforce Grade ≤ 8 (auto re-simplify EN before saving)
                 doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
                 snap["sections"], _fix_report2 = _auto_resimplify_sections_to_grade8(
                     snap["sections"],
@@ -2309,7 +2301,7 @@ with right:
                 )
 
                 log_audit(event="save_review_changes", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"overall_status": overall_doc_status(snap)})
-                st.success("Saved updated version âœ…")
+                st.success("Saved updated version ✅")
 
         with c2:
             if can("export"):
@@ -2349,10 +2341,4 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
-
-
-
-
-
-
 
