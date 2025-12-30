@@ -215,9 +215,19 @@ OCR_MED_CONF = int(os.environ.get("OCR_MED_CONF", "80"))
 
 BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
 
+# ------------------------------------------------------------
+# Secrets helper (Cloud Run-safe)
+# ------------------------------------------------------------
+def safe_secret(key: str, default=None):
+    """Safely read Streamlit secrets without crashing when secrets.toml is absent (e.g., on Cloud Run)."""
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
 # Debug / dev toggles
-PROD = str(os.environ.get("PROD", "") or str(st.secrets.get("PROD", "false"))).lower() in ("1","true","yes")
-DEBUG = (not PROD) and (str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes") or str(st.secrets.get("DEBUG", "false")).lower() in ("1", "true", "yes"))
+PROD = str(os.environ.get("PROD", "") or str(safe_secret("PROD", "false"))).lower() in ("1","true","yes")
+DEBUG = (not PROD) and (str(os.environ.get("DEBUG", "")).lower() in ("1","true","yes") or str(safe_secret("DEBUG", "false")).lower() in ("1","true","yes"))
 
 # ============================================================
 # Page config
@@ -243,8 +253,8 @@ from collections.abc import Mapping
 
 def _get_allowlists() -> Tuple[List[str], List[str]]:
     """Read allow-lists from Secrets (comma-separated strings)."""
-    allowed_domains = st.secrets.get("ALLOWED_DOMAINS", "")
-    allowed_emails = st.secrets.get("ALLOWED_EMAILS", "")
+    allowed_domains = safe_secret("ALLOWED_DOMAINS", "")
+    allowed_emails = safe_secret("ALLOWED_EMAILS", "")
     doms = [d.strip().lower() for d in str(allowed_domains).split(",") if d.strip()]
     ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
     return doms, ems
@@ -268,7 +278,7 @@ def _roles_config() -> Dict[str, List[str]]:
     editor = "e@d.com,f@g.com"
     viewer = "h@i.com"
     """
-    r = st.secrets.get("roles", {})
+    r = safe_secret("roles", {})
     if not isinstance(r, Mapping):
         return {"admin": [], "reviewer": [], "editor": [], "viewer": []}
 
@@ -298,7 +308,7 @@ def role_for_email(email: str) -> str:
 def _auth_missing_keys() -> List[str]:
     """Validate Streamlit auth Secrets for Option A (default provider)."""
     try:
-        auth = st.secrets.get("auth")
+        auth = safe_secret("auth")
         if not isinstance(auth, Mapping):
             return ["[auth]"]
 
@@ -391,7 +401,7 @@ AUTH_EMAIL = require_login()
 st.session_state.auth_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
 
 # --- OPTIONAL: admin-only role override (testing/dev) ---
-ENABLE_ROLE_SWITCH = (not PROD) and DEBUG and (str(st.secrets.get("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes"))
+ENABLE_ROLE_SWITCH = (not PROD) and DEBUG and (str(safe_secret("ENABLE_ROLE_SWITCH", "false")).lower() in ("1","true","yes"))
 
 locked_role = st.session_state.auth_role
 st.session_state.locked_role = locked_role
@@ -439,7 +449,7 @@ def _workspaces_config() -> Dict[str, Dict[str, Any]]:
     clienta  = { name="Client A", domains="clienta.com", emails="" }
     clientb  = { name="Client B", domains="", emails="person@clientb.ca" }
     """
-    ws = st.secrets.get("workspaces", {})
+    ws = safe_secret("workspaces", {})
     if not isinstance(ws, Mapping):
         return {"default": {"name": "Default", "domains": [], "emails": []}}
 
@@ -485,7 +495,7 @@ def scoped_doc_id(doc_id: str, workspace: str) -> str:
 locked_workspace = workspace_for_email(AUTH_EMAIL) if AUTH_EMAIL else "default"
 st.session_state.workspace_locked = locked_workspace
 
-ENABLE_WORKSPACE_SWITCH = (not PROD) and str(st.secrets.get("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1", "true", "yes")
+ENABLE_WORKSPACE_SWITCH = (not PROD) and (str(safe_secret("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1","true","yes"))
 
 active_workspace = locked_workspace
 if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin":
@@ -528,7 +538,7 @@ def can(action: str) -> bool:
 # ============================================================
 # Gemini client
 # ============================================================
-api_key = st.secrets.get("GEMINI_API_KEY", "")
+api_key = os.environ.get("GEMINI_API_KEY", "") or str(safe_secret("GEMINI_API_KEY", "") or "")
 if not api_key:
     st.error("âŒ GEMINI_API_KEY missing in Streamlit secrets.")
     st.stop()
@@ -756,7 +766,7 @@ def analytics_export_csv(days: int = 30) -> bytes:
 # SQLite storage + âœ… Usage Analytics tables
 # ============================================================
 def _pg_enabled() -> bool:
-    return bool(os.environ.get("DATABASE_URL") or st.secrets.get("DATABASE_URL", ""))
+    return bool(os.environ.get("DATABASE_URL") or safe_secret("DATABASE_URL", ""))
 
 DB_KIND = "postgres" if _pg_enabled() else "sqlite"
 
@@ -812,7 +822,7 @@ def _db():
         if psycopg2 is None:
             st.error("Postgres mode requested but psycopg2 is not installed. Add psycopg2-binary to requirements.txt.")
             st.stop()
-        dsn = os.environ.get("DATABASE_URL") or str(st.secrets.get("DATABASE_URL", "") or "")
+        dsn = os.environ.get("DATABASE_URL") or str(safe_secret("DATABASE_URL", "") or "")
         if not dsn:
             st.error("DATABASE_URL missing for Postgres mode.")
             st.stop()
@@ -2597,6 +2607,4 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
-
-
 
