@@ -209,6 +209,7 @@ OCR_MED_CONF = int(os.environ.get("OCR_MED_CONF", "80"))
 BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
 
 # Debug / dev toggles
+PROD = str(os.environ.get("PROD", "") or str(safe_secret("PROD", "true"))).lower() in ("1","true","yes")
 DEBUG = (not PROD) and (str(os.environ.get("DEBUG", "") or str(safe_secret("DEBUG", "false"))).lower() in ("1","true","yes"))
 
 # ============================================================
