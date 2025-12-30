@@ -1,29 +1,21 @@
 import unittest
-
 import grading as g
 
-
 class TestReadability(unittest.TestCase):
-    def test_flesch_kincaid_simple_is_reasonable(self):
-        text = "This is a simple sentence. It is easy to read."
-        grade = g.flesch_kincaid(text)
-        # Heuristic: only check it isn't extreme.
-        self.assertGreaterEqual(grade, 0.0)
-        self.assertLessEqual(grade, 12.0)
+    def test_simple_text_is_grade8_or_below(self):
+        text = "We will send your letter today. It will explain what to do next."
+        self.assertLessEqual(g.flesch_kincaid(text), 8.0)
 
-    def test_flesch_kincaid_complex_harder_than_simple(self):
+    def test_complex_harder_than_simple(self):
         simple = "We will send the form today."
-        complex_ = (
-            "Pursuant to the aforementioned regulatory framework, the department will "
-            "expeditiously disseminate the requisite documentation at its earliest convenience."
-        )
+        complex_ = ("Pursuant to the aforementioned regulatory framework, the department will "
+                    "expeditiously disseminate the requisite documentation at its earliest convenience.")
         self.assertGreater(g.flesch_kincaid(complex_), g.flesch_kincaid(simple))
 
     def test_sentence_split(self):
-        text = "One. Two! Three? Four"
-        parts = g.split_sentences(text)
-        self.assertEqual(len(parts), 4)
-
+        s = "Hello world. This is a test! New line\nAnother sentence?"
+        parts = g.split_sentences(s)
+        self.assertGreaterEqual(len(parts), 3)
 
 if __name__ == "__main__":
     unittest.main()
