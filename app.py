@@ -208,24 +208,8 @@ OCR_MED_CONF = int(os.environ.get("OCR_MED_CONF", "80"))
 
 BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
 
-# ------------------------------------------------------------
-# Secrets helper (Cloud Run-safe)
-# ------------------------------------------------------------
-def safe_secret(key: str, default=None):
-    """Safely read Streamlit secrets without crashing when secrets.toml is absent (e.g., on Cloud Run)."""
-    try:
-        return safe_secret(key, default)
-    except Exception:
-        return default
-
 # Debug / dev toggles
-PROD = str(os.environ.get("PROD", "") or str(safe_secret("PROD", "false"))).lower() in ("1", "true", "yes")
-DEBUG = (not PROD) and (
-    str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes")
-    or str(safe_secret("DEBUG", "false")).lower() in ("1", "true", "yes")
-)
-
-# NOTE: Do not read st.secrets directly elsewhere for optional config. Use safe_secret().
+DEBUG = (not PROD) and (str(os.environ.get("DEBUG", "") or str(safe_secret("DEBUG", "false"))).lower() in ("1","true","yes"))
 
 # ============================================================
 # Page config
@@ -536,13 +520,9 @@ def can(action: str) -> bool:
 # ============================================================
 # Gemini client
 # ============================================================
-# Cloud Run uses environment variables; Streamlit Community Cloud typically uses st.secrets.
-api_key = (os.environ.get("GEMINI_API_KEY") or "").strip() or str(safe_secret("GEMINI_API_KEY", "") or "").strip()
+api_key = safe_secret("GEMINI_API_KEY", "")
 if not api_key:
-    if PROD:
-        st.error("❌ GEMINI_API_KEY missing in environment variables.")
-    else:
-        st.error("❌ GEMINI_API_KEY missing in Streamlit secrets.")
+    st.error("âŒ GEMINI_API_KEY missing in Streamlit secrets.")
     st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -2361,5 +2341,7 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
+
+
 
 
