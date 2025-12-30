@@ -35,7 +35,9 @@ import streamlit as st
 
 
 # Hosting detection
-CLOUD_RUN = bool(os.environ.get(\"K_SERVICE\") or os.environ.get(\"CLOUD_RUN\"))
+CLOUD_RUN = bool(os.environ.get("K_SERVICE") or os.environ.get("CLOUD_RUN"))
+
+
 
 from google import genai
 from google.genai.errors import ClientError
