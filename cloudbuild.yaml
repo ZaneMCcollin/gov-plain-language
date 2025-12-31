@@ -17,7 +17,7 @@ steps:
         '--region', '${_REGION}',
         '--platform', 'managed',
         '--allow-unauthenticated'
-      ] .
+      ]
 
 substitutions:
   _REGION: us-central1
