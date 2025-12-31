@@ -20,5 +20,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code
 COPY . /app
 
+RUN mkdir -p /root/.streamlit
+COPY .streamlit/config.toml /root/.streamlit/config.toml
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+CMD ["/entrypoint.sh"]
+
 # Cloud Run provides PORT; Streamlit must bind to it
 CMD ["sh", "-c", "streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8080}"]
