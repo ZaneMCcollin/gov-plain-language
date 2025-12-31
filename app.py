@@ -42,18 +42,51 @@ def ensure_secrets_toml_from_env():
         return
 
     # build content
-    content = [...]
-    
-    # 👇 THIS BLOCK GOES HERE
-    targets = ["/app/.streamlit/secrets.toml", "/root/.streamlit/secrets.toml"]
-    for path in targets:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("\n".join(content))
+content: list[str] = []
 
-# 🔥 MUST be called immediately after definition
-ensure_secrets_toml_from_env()
+def add_line(s: str) -> None:
+    content.append(str(s))
+
+# Top-level keys
+prod = os.environ.get("PROD", "").strip()
+debug = os.environ.get("DEBUG", "").strip()
+gemini = os.environ.get("GEMINI_API_KEY", "").strip()
+allowed_emails = os.environ.get("ALLOWED_EMAILS", "").strip()
+allowed_domains = os.environ.get("ALLOWED_DOMAINS", "").strip()
+enable_role_switch = os.environ.get("ENABLE_ROLE_SWITCH", "").strip()
+enable_workspace_switch = os.environ.get("ENABLE_WORKSPACE_SWITCH", "").strip()
+
+if prod: add_line(f'PROD = "{prod}"')
+if debug: add_line(f'DEBUG = "{debug}"')
+if gemini: add_line(f'GEMINI_API_KEY = "{gemini}"')
+    if not gemini:
+    return  # don't write empty secrets
+if allowed_emails: add_line(f'ALLOWED_EMAILS = "{allowed_emails}"')
+if allowed_domains: add_line(f'ALLOWED_DOMAINS = "{allowed_domains}"')
+if enable_role_switch: add_line(f'ENABLE_ROLE_SWITCH = "{enable_role_switch}"')
+if enable_workspace_switch: add_line(f'ENABLE_WORKSPACE_SWITCH = "{enable_workspace_switch}"')
+
+# Auth
+auth_redirect = os.environ.get("AUTH_REDIRECT_URI", "").strip()
+auth_cookie = os.environ.get("AUTH_COOKIE_SECRET", "").strip()
+auth_meta = os.environ.get(
+    "AUTH_SERVER_METADATA_URL",
+    "https://accounts.google.com/.well-known/openid-configuration"
+).strip()
+google_id = os.environ.get("AUTH_GOOGLE_CLIENT_ID", "").strip()
+google_secret = os.environ.get("AUTH_GOOGLE_CLIENT_SECRET", "").strip()
+
+add_line("")
+add_line("[auth]")
+add_line(f'redirect_uri = "{auth_redirect}"')
+add_line(f'cookie_secret = "{auth_cookie}"')
+add_line(f'server_metadata_url = "{auth_meta}"')
+add_line("")
+add_line("[auth.google]")
+add_line(f'client_id = "{google_id}"')
+add_line(f'client_secret = "{google_secret}"')
+add_line("")
+
 
 
 
