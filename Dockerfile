@@ -15,7 +15,8 @@ WORKDIR /app
 
 # Install Python deps first (better caching)
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
 
 # Copy app code
 COPY . /app
@@ -27,6 +28,3 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 CMD ["/entrypoint.sh"]
-
-# Cloud Run provides PORT; Streamlit must bind to it
-CMD ["sh", "-c", "streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8080}"]
