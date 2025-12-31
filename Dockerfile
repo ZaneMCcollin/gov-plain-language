@@ -1,21 +1,17 @@
-FROM python:3.11-slim
+CMD ["bash","-lc","
+set -e
+mkdir -p /app/.streamlit /root/.streamlit
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+cat > /app/.streamlit/secrets.toml <<EOF
+[auth]
+redirect_uri = \"${AUTH_REDIRECT_URI}\"
+cookie_secret = \"${AUTH_COOKIE_SECRET}\"
+client_id = \"${AUTH_GOOGLE_CLIENT_ID}\"
+client_secret = \"${AUTH_GOOGLE_CLIENT_SECRET}\"
+server_metadata_url = \"${AUTH_SERVER_METADATA_URL}\"
+EOF
 
-WORKDIR /app
+cp /app/.streamlit/secrets.toml /root/.streamlit/secrets.toml
 
-# System deps (tesseract optional; remove if you don't need OCR)
-RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
-    libgl1 \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
-COPY . /app
-
-# Cloud Run sets $PORT. Streamlit must listen on it.
-CMD ["bash", "-lc", "streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true"]
-
+streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8080} --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false
+"]
