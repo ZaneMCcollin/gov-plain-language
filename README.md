@@ -15,3 +15,5 @@ What tests cover:
 - Sentence splitting behavior.
 
 Note: Grade ≤ 8 enforcement in the app is enforced at save/export time and depends on LLM outputs; unit tests validate the grading functions used for that enforcement and auditor review.
+
+Auto-deploy test commit
