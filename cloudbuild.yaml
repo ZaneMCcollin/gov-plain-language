@@ -1,11 +1,12 @@
 steps:
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', '${_AR_IMAGE}', '.']
+  args: ['build', '-f', 'Dockerfile', '-t', '${_AR_IMAGE}', '.']
 
-  # Push to Artifact Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', '${_AR_IMAGE}']
+ # Push to Artifact Registry
+ - name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-f', 'Dockerfile', '-t', '${_AR_IMAGE}', '.']
+
 
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
