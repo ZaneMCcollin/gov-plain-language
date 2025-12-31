@@ -32,15 +32,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
-def _secrets_probe():
-    try:
-        d = st.secrets.to_dict()
-        st.success(f"Secrets loaded ✅ keys: {sorted(list(d.keys()))}")
-        st.info(f"Has auth: {'auth' in d} | Has GEMINI_API_KEY: {'GEMINI_API_KEY' in d}")
-    except Exception as e:
-        st.error(f"Secrets NOT loaded ❌ {type(e).__name__}: {e}")
-
-_secrets_probe()
 
 
 from google import genai
