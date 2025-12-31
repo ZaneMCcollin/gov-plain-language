@@ -1,0 +1,28 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', '${_AR_IMAGE}', '.']
+
+  # Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_AR_IMAGE}']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      [
+        'run', 'deploy', '${_SERVICE}',
+        '--image', '${_AR_IMAGE}',
+        '--region', '${_REGION}',
+        '--platform', 'managed',
+        '--allow-unauthenticated'
+      ]
+
+substitutions:
+  _REGION: us-central1
+  _SERVICE: gov-plain-language
+  _AR_IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-repo/gov-plain-language:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
