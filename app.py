@@ -19,7 +19,6 @@
 # - âœ… Usage analytics: per-user events for billing insight + admin CSV export
 # ============================================================
 
-import os
 import io
 import re
 import json
@@ -32,6 +31,31 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
+import os
+
+import streamlit as st
+import os
+
+def ensure_secrets_toml_from_env():
+    # detect Cloud Run
+    if not os.environ.get("K_SERVICE"):
+        return
+
+    # build content
+    content = [...]
+    
+    # 👇 THIS BLOCK GOES HERE
+    targets = ["/app/.streamlit/secrets.toml", "/root/.streamlit/secrets.toml"]
+    for path in targets:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(content))
+
+# 🔥 MUST be called immediately after definition
+ensure_secrets_toml_from_env()
+
+
 
 
 from google import genai
