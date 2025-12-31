@@ -1,17 +1,24 @@
-CMD ["bash","-lc","
-set -e
-mkdir -p /app/.streamlit /root/.streamlit
+FROM python:3.11-slim
 
-cat > /app/.streamlit/secrets.toml <<EOF
-[auth]
-redirect_uri = \"${AUTH_REDIRECT_URI}\"
-cookie_secret = \"${AUTH_COOKIE_SECRET}\"
-client_id = \"${AUTH_GOOGLE_CLIENT_ID}\"
-client_secret = \"${AUTH_GOOGLE_CLIENT_SECRET}\"
-server_metadata_url = \"${AUTH_SERVER_METADATA_URL}\"
-EOF
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-cp /app/.streamlit/secrets.toml /root/.streamlit/secrets.toml
+# System deps for OCR + PDFs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-fra \
+    tesseract-ocr-osd \
+    && rm -rf /var/lib/apt/lists/*
 
-streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8080} --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false
-"]
+WORKDIR /app
+
+# Install Python deps first (better caching)
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy app code
+COPY . /app
+
+# Cloud Run provides PORT; Streamlit must bind to it
+CMD ["sh", "-c", "streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8080}"]
