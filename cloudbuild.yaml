@@ -20,9 +20,10 @@ steps:
       ]
 
 substitutions:
-  _REGION: us-central1
+  _REGION:northamerica-northeast2
   _SERVICE: gov-plain-language
-  _AR_IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-repo/gov-plain-language:$COMMIT_SHA
+  _AR_IMAGE: northamerica-northeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-repo/gov-plain-language:$COMMIT_SHA
+
 
 options:
   logging: CLOUD_LOGGING_ONLY
