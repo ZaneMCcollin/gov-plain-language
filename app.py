@@ -15,8 +15,8 @@
 # - Streamlit Cloud ready (no fixed port in config.toml; Docker uses $PORT)
 # - Watermark: DRAFT vs APPROVED on PDFs + status banner on DOCX
 # - Compliance Report export (PDF summary)
-# - âœ… Auth: Streamlit built-in login (Google/OIDC) + domain/email allowlist
-# - âœ… Usage analytics: per-user events for billing insight + admin CSV export
+# - ✅ Auth: Streamlit built-in login (Google/OIDC) + domain/email allowlist
+# - ✅ Usage analytics: per-user events for billing insight + admin CSV export
 # ============================================================
 
 import io
@@ -34,71 +34,66 @@ import streamlit as st
 import os
 
 def ensure_secrets_toml_from_env() -> None:
-    # Only run on Cloud Run
+    """On Cloud Run, write Streamlit secrets.toml from environment variables.
+
+    Why: st.secrets is file-based. Cloud Run typically provides env vars.
+    This keeps one codebase that works on both Streamlit Community Cloud and Cloud Run.
+
+    Notes:
+    - We ALWAYS (re)write secrets.toml on Cloud Run so stale/empty files don't break auth.
+    - We write to both /app/.streamlit and /root/.streamlit (Streamlit checks both).
+    """
     if not os.environ.get("K_SERVICE"):
+        return  # not Cloud Run
+
+    gemini = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not gemini:
+        # Don't create an empty secrets file; the app will show a clear error later.
         return
 
-    content: list[str] = []
+    lines: list[str] = []
 
-    def add_line(s: str) -> None:
-        content.append(str(s))
+    def add(s: str) -> None:
+        lines.append(str(s))
 
     # Top-level keys
-    prod = os.environ.get("PROD", "").strip()
-    debug = os.environ.get("DEBUG", "").strip()
-    gemini = os.environ.get("GEMINI_API_KEY", "").strip()
-    allowed_emails = os.environ.get("ALLOWED_EMAILS", "").strip()
-    allowed_domains = os.environ.get("ALLOWED_DOMAINS", "").strip()
-    enable_role_switch = os.environ.get("ENABLE_ROLE_SWITCH", "").strip()
-    enable_workspace_switch = os.environ.get("ENABLE_WORKSPACE_SWITCH", "").strip()
+    add(f'GEMINI_API_KEY = "{gemini}"')
 
-    # If Gemini key is missing, do NOT write secrets
-    if not gemini:
-        return
+    for k in ("PROD", "DEBUG", "ALLOWED_EMAILS", "ALLOWED_DOMAINS", "ENABLE_ROLE_SWITCH", "ENABLE_WORKSPACE_SWITCH"):
+        v = (os.environ.get(k) or "").strip()
+        if v:
+            add(f'{k} = "{v}"')
 
-    if prod: add_line(f'PROD = "{prod}"')
-    if debug: add_line(f'DEBUG = "{debug}"')
-    add_line(f'GEMINI_API_KEY = "{gemini}"')
-    if allowed_emails: add_line(f'ALLOWED_EMAILS = "{allowed_emails}"')
-    if allowed_domains: add_line(f'ALLOWED_DOMAINS = "{allowed_domains}"')
-    if enable_role_switch: add_line(f'ENABLE_ROLE_SWITCH = "{enable_role_switch}"')
-    if enable_workspace_switch: add_line(f'ENABLE_WORKSPACE_SWITCH = "{enable_workspace_switch}"')
+    # Auth (Streamlit built-in auth)
+    auth_redirect = (os.environ.get("AUTH_REDIRECT_URI") or "").strip()
+    auth_cookie = (os.environ.get("AUTH_COOKIE_SECRET") or "").strip()
+    auth_meta = (os.environ.get("AUTH_SERVER_METADATA_URL") or "https://accounts.google.com/.well-known/openid-configuration").strip()
+    google_id = (os.environ.get("AUTH_GOOGLE_CLIENT_ID") or "").strip()
+    google_secret = (os.environ.get("AUTH_GOOGLE_CLIENT_SECRET") or "").strip()
 
-    # Auth
-    auth_redirect = os.environ.get("AUTH_REDIRECT_URI", "").strip()
-    auth_cookie = os.environ.get("AUTH_COOKIE_SECRET", "").strip()
-    auth_meta = os.environ.get(
-        "AUTH_SERVER_METADATA_URL",
-        "https://accounts.google.com/.well-known/openid-configuration"
-    ).strip()
-    google_id = os.environ.get("AUTH_GOOGLE_CLIENT_ID", "").strip()
-    google_secret = os.environ.get("AUTH_GOOGLE_CLIENT_SECRET", "").strip()
+    # Only write auth section if we have the minimum needed.
+    if auth_redirect and auth_cookie and google_id and google_secret:
+        add("")
+        add("[auth]")
+        add(f'redirect_uri = "{auth_redirect}"')
+        add(f'cookie_secret = "{auth_cookie}"')
+        add(f'server_metadata_url = "{auth_meta}"')
+        add("")
+        add("[auth.google]")
+        add(f'client_id = "{google_id}"')
+        add(f'client_secret = "{google_secret}"')
+        add("")
 
-    add_line("")
-    add_line("[auth]")
-    add_line(f'redirect_uri = "{auth_redirect}"')
-    add_line(f'cookie_secret = "{auth_cookie}"')
-    add_line(f'server_metadata_url = "{auth_meta}"')
-    add_line("")
-    add_line("[auth.google]")
-    add_line(f'client_id = "{google_id}"')
-    add_line(f'client_secret = "{google_secret}"')
-    add_line("")
+    payload = "\n".join(lines) + "\n"
 
-    # Write to BOTH paths Streamlit checks
-    targets = ["/app/.streamlit/secrets.toml", "/root/.streamlit/secrets.toml"]
-    for path in targets:
+    for path in ("/app/.streamlit/secrets.toml", "/root/.streamlit/secrets.toml"):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("\n".join(content))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(payload)
 
 
-# 🔥 MUST be called immediately after definition
+# MUST be called immediately after definition
 ensure_secrets_toml_from_env()
-
-
-
 
 
 
@@ -141,8 +136,8 @@ def _write_if_missing(path: str, content: str) -> None:
         f.write(content)
 
 def _bootstrap_project_files() -> None:
-    # âœ… Pin Streamlit new enough to support st.login / st.user
-    # âœ… Authlib required for Google auth on Streamlit Community Cloud
+    # ✅ Pin Streamlit new enough to support st.login / st.user
+    # ✅ Authlib required for Google auth on Streamlit Community Cloud
     _write_if_missing(
         "requirements.txt",
         "\n".join([
@@ -207,7 +202,7 @@ def _bootstrap_project_files() -> None:
         ])
     )
 
-    # âœ… Streamlit Cloud friendly: do NOT pin port/address here
+    # ✅ Streamlit Cloud friendly: do NOT pin port/address here
     os.makedirs(".streamlit", exist_ok=True)
     _write_if_missing(
         ".streamlit/config.toml",
@@ -223,7 +218,7 @@ def _bootstrap_project_files() -> None:
         ])
     )
 
-    # âœ… Minimal unit tests (stdlib unittest; no extra deps)
+    # ✅ Minimal unit tests (stdlib unittest; no extra deps)
     _write_if_missing(
         os.path.join("tests", "test_grading.py"),
         "\n".join([
@@ -282,6 +277,10 @@ BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
 # ============================================================
 
 def safe_secret(key: str, default=None):
+    """Return a config value from env first, then Streamlit secrets."""
+    v = os.environ.get(key)
+    if v is not None and str(v).strip() != "":
+        return v
     try:
         return st.secrets.get(key, default)
     except Exception:
@@ -306,14 +305,21 @@ st.title("🇨🇦 GovCan Plain Language Converter")
 # Hosted-mode warning (Streamlit Cloud demo: disk persistence not guaranteed)
 # ============================================================
 def _is_streamlit_cloud() -> bool:
-    return bool(os.environ.get("STREAMLIT_SERVER_HEADLESS"))
+    # Avoid false-positives on Cloud Run (we also run headless there).
+    if os.environ.get("K_SERVICE"):
+        return False
+    return bool(
+        os.environ.get("STREAMLIT_SHARING")
+        or os.environ.get("STREAMLIT_CLOUD")
+        or os.environ.get("STREAMLIT_COMMUNITY_CLOUD")
+    )
 
 if _is_streamlit_cloud():
     st.caption("Running in hosted mode. Note: local file storage (including SQLite) may not persist across reboots on Streamlit Community Cloud.")
 
 # ============================================================
 # ============================================================
-# âœ… Authentication + Allow-lists + Locked roles (from Secrets)
+# ✅ Authentication + Allow-lists + Locked roles (from Secrets)
 # ============================================================
 
 from collections.abc import Mapping
@@ -411,92 +417,69 @@ def _user_email() -> str:
         return ""
 
 def require_login() -> str:
-    # If Streamlit auth API isn't available (local / older runtime), don't block.
-    if not hasattr(st, "login") or not hasattr(st, "user"):
-        st.caption("Auth disabled (local or unsupported runtime).")
-        return ""
+    """Return the logged-in user's email (or "" if not logged in).
 
-    missing = _auth_missing_keys()
-    if missing:
-        st.warning("Auth is not configured correctly in Streamlit Cloud Secrets.")
-        st.caption("Missing:")
-        for k in missing:
-            st.write(f"- {k}")
-        return ""  # don't call st.login() if misconfigured
-
-    try:
-        email = _user_email()
-        if email:
-            doms, ems = _get_allowlists()
-
-            # Allow rules:
-            # - If both lists are set: allow if (email in ALLOWED_EMAILS) OR (domain in ALLOWED_DOMAINS)
-            # - If only ALLOWED_EMAILS: must match
-            # - Else if only ALLOWED_DOMAINS: domain must match
-            # - Else: allow anyone who can authenticate
-            domain_ok = ("@" in email and email.split("@", 1)[1] in doms) if doms else False
-            email_ok = (email in ems) if ems else False
-
-            if ems and doms:
-                if email_ok or domain_ok:
+    Priority:
+    1) If Streamlit's built-in auth (st.login/st.user) is available AND configured, use it.
+    2) Otherwise (common on Cloud Run), fall back to a simple allowlist login UI.
+    """
+    # --- A) Streamlit built-in auth path ---
+    if hasattr(st, "login") and hasattr(st, "user"):
+        missing = _auth_missing_keys()
+        if not missing:
+            try:
+                email = _user_email()
+                if email:
+                    if not _is_allowed(email):
+                        st.error("❌ You are not authorized to use this app.")
+                        st.stop()
                     return email
-            elif ems:
-                if email_ok:
-                    return email
-            elif doms:
-                if domain_ok:
-                    return email
-            else:
-                return email
 
-            st.error("Access denied: your account is not on the allow-list.")
-            if hasattr(st, "logout"):
-                st.logout()
+                # Not logged in yet
+                st.info("Please sign in to continue.")
+                st.login()
+                st.stop()
+            except Exception:
+                # If Streamlit auth throws in this runtime, fall back below.
+                pass
+        else:
+            # Only show the 'missing auth' warning on Streamlit Community Cloud.
+            if _is_streamlit_cloud():
+                st.warning("Auth is not configured correctly in Streamlit Cloud Secrets.")
+                st.caption("Missing:")
+                for k in missing:
+                    st.write(f"- {k}")
+
+    # --- B) Cloud Run / fallback allowlist login ---
+    # If allowlists are not set, do not hard-block in dev; in PROD, block.
+    allowed_emails, allowed_domains = _get_allowlists()
+    prod = str(safe_secret("PROD", "")).strip().lower() in ("1", "true", "yes", "y")
+
+    st.info("Please sign in to continue.")
+    email = st.text_input("Email", placeholder="you@example.com").strip().lower()
+    if st.button("Log in"):
+        if not email or "@" not in email:
+            st.error("Enter a valid email.")
             st.stop()
 
-        st.info("Please sign in to continue.")
-        if st.button("Log in", use_container_width=True):
-            st.login()  # Option A: default provider
-        st.stop()
+        if allowed_emails or allowed_domains:
+            if not _is_allowed(email):
+                st.error("❌ You are not authorized to use this app.")
+                st.stop()
+        else:
+            if prod:
+                st.error("❌ App is in PROD but allowlists are not configured (ALLOWED_EMAILS / ALLOWED_DOMAINS).")
+                st.stop()
 
-    except Exception as e:
-        st.error("Authentication error.")
-        st.code(repr(e))
-        st.stop()
+        st.session_state["manual_auth_email"] = email
+        st.experimental_rerun()
 
-    return ""
+    # If already logged via fallback
+    email2 = (st.session_state.get("manual_auth_email") or "").strip().lower()
+    if email2:
+        return email2
 
-# --- run auth ---
-AUTH_EMAIL = require_login()
-
-# --- lock role from Secrets (NO UI override) ---
-st.session_state.auth_role = role_for_email(AUTH_EMAIL) if AUTH_EMAIL else "viewer"
-
-# --- OPTIONAL: admin-only role override (testing/dev) ---
-ENABLE_ROLE_SWITCH = DEBUG and (str(safe_secret("ENABLE_ROLE_SWITCH", "false")).lower() in ("1", "true", "yes"))
-
-locked_role = st.session_state.auth_role
-st.session_state.locked_role = locked_role
-
-if ENABLE_ROLE_SWITCH and locked_role == "admin":
-    st.sidebar.divider()
-    st.sidebar.subheader("Admin: Role override (testing)")
-
-    if "role_override" not in st.session_state:
-        st.session_state.role_override = locked_role
-
-    st.sidebar.selectbox(
-        "Act as role",
-        ["admin", "editor", "reviewer", "viewer"],
-        key="role_override",
-    )
-
-    if st.sidebar.button("Reset to locked role", use_container_width=True):
-        st.session_state.pop("role_override", None)
-        st.rerun()
-
-    # Effective role used by app
-    st.session_state.auth_role = st.session_state.get("role_override", locked_role)
+    st.stop()
 
 # ============================================================
 
@@ -613,7 +596,7 @@ def can(action: str) -> bool:
 # ============================================================
 api_key = safe_secret("GEMINI_API_KEY", "")
 if not api_key:
-    st.error("âŒ GEMINI_API_KEY missing in Streamlit secrets.")
+    st.error("❌ GEMINI_API_KEY is missing. Set it in Cloud Run env vars (recommended) or Streamlit Secrets.")
     st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -750,7 +733,7 @@ def analytics_export_csv(days: int = 30) -> bytes:
     return out.getvalue().encode("utf-8")
 
 # ============================================================
-# SQLite storage + âœ… Usage Analytics tables
+# SQLite storage + ✅ Usage Analytics tables
 # ============================================================
 def _db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
@@ -1351,7 +1334,7 @@ def sentence_heatmap_html_en(text: str, target: float = 8.0) -> str:
     return "<div style='line-height:1.8'>" + " ".join(spans) + "</div>"
 
 # ============================================================
-# LLM (rate-limit safe + caps BEFORE calling) + âœ… usage logging
+# LLM (rate-limit safe + caps BEFORE calling) + ✅ usage logging
 # ============================================================
 def safe_generate(prompt: str, retries: int = LLM_RETRIES):
     delay = 2
@@ -1527,7 +1510,7 @@ TEXT:
     return best
 
 # ============================================================
-# âœ… Hard-enforce Grade ≤ 8 across sections (auto re-simplify EN)
+# ✅ Hard-enforce Grade ≤ 8 across sections (auto re-simplify EN)
 # ============================================================
 
 def _auto_resimplify_sections_to_grade8(
@@ -1653,7 +1636,7 @@ def build_docx(snapshot: Dict[str, Any]) -> bytes:
     doc = Document()
     doc.add_heading("GovCan Plain Language Converter", 1)
 
-    # âœ… Reliable DOCX "watermark": status banner
+    # ✅ Reliable DOCX "watermark": status banner
     status = overall_doc_status(snapshot)
     banner = doc.add_paragraph(f"STATUS: {status}")
     banner.runs[0].bold = True
@@ -1708,7 +1691,7 @@ def build_pdf(snapshot: Dict[str, Any]) -> bytes:
     c = canvas.Canvas(buff, pagesize=letter)
     width, height = letter
 
-    # âœ… Watermark DRAFT vs APPROVED
+    # ✅ Watermark DRAFT vs APPROVED
     status = overall_doc_status(snapshot)
     pdf_watermark(c, status, width, height)
 
@@ -1912,11 +1895,11 @@ with st.sidebar:
     st.divider()
     doc_id_in = st.text_input("Document ID", value=st.session_state.doc_id, placeholder="e.g., client-abc-001")
 
-    # âœ… FIX: changing document id should not lock extraction cache
+    # ✅ FIX: changing document id should not lock extraction cache
     if doc_id_in != st.session_state.doc_id:
         st.session_state.doc_id = doc_id_in.strip()
         st.session_state.snapshot = None
-        st.session_state.last_extract_key = ""  # âœ… IMPORTANT
+        st.session_state.last_extract_key = ""  # ✅ IMPORTANT
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1964,7 +1947,7 @@ with st.sidebar:
         else:
             st.caption("No versions yet.")
 
-    # âœ… Admin analytics panel (billing info)
+    # ✅ Admin analytics panel (billing info)
     if can("analytics"):
         st.divider()
         st.subheader("Usage Analytics")
@@ -2099,7 +2082,7 @@ with left:
     meta = st.session_state.extract_meta or {}
     if meta:
         if meta.get("ocr_failed"):
-            st.error("OCR failed âŒ (check tesseract install / language packs)")
+            st.error("OCR failed ❌ (check tesseract install / language packs)")
         elif meta.get("ocr_used"):
             st.success(f"OCR used ✅ — OCR lang guess: {meta.get('ocr_detected_lang','unknown')} | Detected: {meta.get('detected_lang','unknown')}")
         else:
@@ -2190,7 +2173,7 @@ with right:
             "source_text": safe_text,
             "sections": out_sections,
         }
-        # âœ… Hard-enforce Grade ≤ 8 (auto re-simplify English before saving)
+        # ✅ Hard-enforce Grade ≤ 8 (auto re-simplify English before saving)
         doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
 
         out_sections, _fix_report = _auto_resimplify_sections_to_grade8(
@@ -2259,7 +2242,7 @@ with right:
     else:
         st.subheader("Reviewer workflow + exports")
 
-        # âœ… GovCan compliance banner: Plain-language target met / not met
+        # ✅ GovCan compliance banner: Plain-language target met / not met
         _all_grades_ok = True
         _worst = 0.0
         try:
@@ -2274,7 +2257,7 @@ with right:
         if _all_grades_ok:
             st.success("✅ Plain-language target met (English Grade ≤ 8 in all sections).")
         else:
-            st.error(f"âŒ Plain-language target NOT met (worst section Grade: {_worst:.2f}).")
+            st.error(f"❌ Plain-language target NOT met (worst section Grade: {_worst:.2f}).")
 
         st.caption(f"Overall document status: **{overall_doc_status(snap)}**")
 
@@ -2347,7 +2330,7 @@ with right:
                 for _s in snap["sections"]:
                     _s["grade_en"] = flesch_kincaid(_s.get("en","") or "")
                     _s["grade_fr"] = french_readability(_s.get("fr","") or "")
-                # âœ… Hard-enforce Grade ≤ 8 (auto re-simplify EN before saving)
+                # ✅ Hard-enforce Grade ≤ 8 (auto re-simplify EN before saving)
                 doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
                 snap["sections"], _fix_report2 = _auto_resimplify_sections_to_grade8(
                     snap["sections"],
