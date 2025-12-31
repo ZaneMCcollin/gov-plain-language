@@ -600,12 +600,12 @@ ROLE_PERMS = {
     "editor":   {"convert", "export", "edit_outputs"},
     "viewer":   set(),
 }
-
 def can(action: str) -> bool:
     role = st.session_state.get("auth_role", "viewer")
     if role == "admin":
         return True
     return action in ROLE_PERMS.get(role, set())
+
 
 # ============================================================
 # Gemini client
