@@ -2,3 +2,5 @@
 headless = true
 enableCORS = false
 enableXsrfProtection = false
+[auth]
+redirect_uri = "https://gov-plain-language-657594795860.northamerica-northeast2.run.app/oauth2callback"
