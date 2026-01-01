@@ -416,6 +416,21 @@ def _user_email() -> str:
     except Exception:
         return ""
 
+def _is_allowed(email: str) -> bool:
+    if not email:
+        return False
+
+    email = email.lower().strip()
+
+    allowed_domains = [d.strip().lower() for d in os.getenv("ALLOWED_DOMAINS", "").split(",") if d.strip()]
+    allowed_emails = [e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()]
+
+    if email in allowed_emails:
+        return True
+
+    domain = email.split("@")[-1]
+    return domain in allowed_domains
+
 def require_login() -> str:
     """Return the logged-in user's email (or "" if not logged in).
 
