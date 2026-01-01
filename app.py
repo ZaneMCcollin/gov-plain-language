@@ -474,7 +474,8 @@ def require_login() -> str:
                 st.caption("Set ALLOWED_EMAILS or ALLOWED_DOMAINS in Cloud Run env vars to enforce access control.")
 
         st.session_state["manual_auth_email"] = email
-        st.experimental_rerun()
+       st.rerun()
+
 
     # If already logged via fallback
     email2 = (st.session_state.get("manual_auth_email") or "").strip().lower()
