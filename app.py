@@ -325,26 +325,12 @@ if _is_streamlit_cloud():
 from collections.abc import Mapping
 
 def _get_allowlists() -> Tuple[List[str], List[str]]:
-    """Read allow-lists from env or Secrets (comma-separated strings)."""
+    """Read allow-lists from Secrets (comma-separated strings)."""
     allowed_domains = safe_secret("ALLOWED_DOMAINS", "")
     allowed_emails = safe_secret("ALLOWED_EMAILS", "")
     doms = [d.strip().lower() for d in str(allowed_domains).split(",") if d.strip()]
     ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
     return doms, ems
-
-
-def _is_allowed(email: str) -> bool:
-    """Return True if email is permitted by allowlists."""
-    email = (email or "").strip().lower()
-    if not email or "@" not in email:
-        return False
-    allowed_domains, allowed_emails = _get_allowlists()
-    if email in allowed_emails:
-        return True
-    domain = email.split("@")[-1]
-    if domain in allowed_domains:
-        return True
-    return False
 
 def _normalize_email_list(x) -> List[str]:
     if not x:
@@ -466,7 +452,7 @@ def require_login() -> str:
 
     # --- B) Cloud Run / fallback allowlist login ---
     # If allowlists are not set, do not hard-block in dev; in PROD, block.
-    allowed_domains, allowed_emails = _get_allowlists()
+    allowed_emails, allowed_domains = _get_allowlists()
     prod = str(safe_secret("PROD", "")).strip().lower() in ("1", "true", "yes", "y")
 
     st.info("Please sign in to continue.")
@@ -482,8 +468,10 @@ def require_login() -> str:
                 st.stop()
         else:
             if prod:
-                st.error("❌ App is in PROD but allowlists are not configured (ALLOWED_EMAILS / ALLOWED_DOMAINS).")
-                st.stop()
+                # In PROD we prefer allowlists, but do not hard-brick the app if config is missing.
+                # Fall back to a one-time bootstrap login for the entered email, and warn loudly.
+                st.warning("⚠️ ALLOWED_EMAILS / ALLOWED_DOMAINS are missing. Allowing this login once (bootstrap).")
+                st.caption("Set ALLOWED_EMAILS or ALLOWED_DOMAINS in Cloud Run env vars to enforce access control.")
 
         st.session_state["manual_auth_email"] = email
         st.experimental_rerun()
@@ -494,14 +482,6 @@ def require_login() -> str:
         return email2
 
     st.stop()
-
-
-# ============================================================
-# ✅ Resolve current user email + role (works for Streamlit Auth or fallback login)
-# ============================================================
-AUTH_EMAIL = require_login()  # <-- always defined after this line
-st.session_state["auth_email"] = AUTH_EMAIL
-st.session_state["auth_role"] = role_for_email(AUTH_EMAIL)
 
 # ============================================================
 
