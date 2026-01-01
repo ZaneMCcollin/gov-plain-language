@@ -25,6 +25,7 @@ RUN mkdir -p /root/.streamlit
 COPY .streamlit/config.toml /root/.streamlit/config.toml
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh && sed -i 's/\r$//' /entrypoint.sh
 
 CMD ["/entrypoint.sh"]
+
