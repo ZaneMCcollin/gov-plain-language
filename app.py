@@ -484,6 +484,14 @@ def require_login() -> str:
     st.stop()
 
 # ============================================================
+# Resolve authenticated user (fix AUTH_EMAIL NameError)
+# ============================================================
+AUTH_EMAIL = require_login() or ""
+st.session_state["auth_email"] = AUTH_EMAIL
+if "auth_role" not in st.session_state:
+    st.session_state["auth_role"] = role_for_email(AUTH_EMAIL)
+
+# ============================================================
 
 # ============================================================
 # ðŸ’¼ Client workspaces (multi-tenant namespace)
@@ -2417,6 +2425,5 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
-
 
 
