@@ -343,15 +343,31 @@ def _normalize_email_list(x) -> List[str]:
 
 def _roles_config() -> Dict[str, List[str]]:
     """
-    Reads from Secrets:
+    Reads roles from Streamlit Secrets OR Cloud Run env.
 
-    [roles]
-    admin = "a@b.com"
-    reviewer = "c@d.com"
-    editor = "e@d.com,f@g.com"
-    viewer = "h@i.com"
+    Supported formats:
+
+    A) Secrets.toml mapping (Streamlit style):
+
+        [roles]
+        admin = "a@b.com"
+        reviewer = "c@d.com"
+        editor = "e@d.com,f@g.com"
+        viewer = "h@i.com"
+
+    B) JSON string (Cloud Run env var), e.g.:
+
+        roles = '{"admin":["a@b.com"],"editor":["e@d.com"]}'
     """
     r = safe_secret("roles", {})
+
+    # Cloud Run env vars are strings — allow JSON.
+    if isinstance(r, str):
+        try:
+            r = json.loads(r)
+        except Exception:
+            r = {}
+
     if not isinstance(r, Mapping):
         return {"admin": [], "reviewer": [], "editor": [], "viewer": []}
 
@@ -362,8 +378,23 @@ def _roles_config() -> Dict[str, List[str]]:
         "viewer": _normalize_email_list(r.get("viewer")),
     }
 
+def _superadmin_emails() -> List[str]:
+    """Emails that should ALWAYS be admin (env/secrets override)."""
+    single = (os.environ.get("SUPERADMIN_EMAIL") or safe_secret("SUPERADMIN_EMAIL", "") or "").strip()
+    multi = (os.environ.get("SUPERADMIN_EMAILS") or safe_secret("SUPERADMIN_EMAILS", "") or "").strip()
+    out: List[str] = []
+    if single:
+        out.append(single)
+    out.extend([e.strip() for e in multi.split(",") if e.strip()])
+    return [e.lower() for e in out]
+
 def role_for_email(email: str) -> str:
     email = (email or "").strip().lower()
+
+    # ✅ Hard pin: superadmins are always admin (even if roles config is missing/broken).
+    if email and email in _superadmin_emails():
+        return "admin"
+
     roles = _roles_config()
 
     # priority order
