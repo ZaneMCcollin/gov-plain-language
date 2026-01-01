@@ -495,6 +495,14 @@ def require_login() -> str:
 
     st.stop()
 
+
+# ============================================================
+# ✅ Resolve current user email + role (works for Streamlit Auth or fallback login)
+# ============================================================
+AUTH_EMAIL = require_login()  # <-- always defined after this line
+st.session_state["auth_email"] = AUTH_EMAIL
+st.session_state["auth_role"] = role_for_email(AUTH_EMAIL)
+
 # ============================================================
 
 # ============================================================
