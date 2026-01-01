@@ -13,3 +13,11 @@ redirect_uri = "https://gov-plain-language-657594795860.northamerica-northeast2.
 client_id = "${AUTH_GOOGLE_CLIENT_ID}"
 client_secret = "${AUTH_GOOGLE_CLIENT_SECRET}"
 EOF
+
+exec streamlit run app.py \
+  --server.address=0.0.0.0 \
+  --server.port="${PORT:-8080}" \
+  --server.headless=true \
+  --server.enableCORS=false \
+  --server.enableXsrfProtection=false
+
