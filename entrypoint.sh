@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
+
 mkdir -p /root/.streamlit
+
 cat > /root/.streamlit/secrets.toml <<EOF
 GEMINI_API_KEY = "${GEMINI_API_KEY}"
 
