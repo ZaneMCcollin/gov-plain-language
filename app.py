@@ -546,6 +546,13 @@ def scoped_doc_id(doc_id: str, workspace: str) -> str:
         return ""
     return f"{w}::{d}"
 
+
+# ============================================================
+# Resolve authenticated user (must be defined before use)
+# ============================================================
+AUTH_EMAIL = require_login()
+st.session_state["auth_role"] = role_for_email(AUTH_EMAIL)
+
 # Determine workspace (locked from Secrets) + optional admin override
 locked_workspace = workspace_for_email(AUTH_EMAIL) if AUTH_EMAIL else "default"
 st.session_state.workspace_locked = locked_workspace
