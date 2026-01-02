@@ -742,7 +742,7 @@ def _db_init() -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_email_ws ON role_assignments(email, workspace)")
 
-    # Back-compat: older DBs may not have the new 'role' column.
+# Back-compat: older DBs may not have the new 'role' column.
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(audit_logs)").fetchall()]
         if "role" not in cols:
