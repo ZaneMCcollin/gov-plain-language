@@ -30,6 +30,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from collections.abc import Mapping
 import streamlit as st
 import os
 
@@ -437,58 +438,8 @@ if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin" and 
     
 active_workspace = st.session_state.get("workspace_override", locked_workspace)
 
-# Admin: Role editor (stored in SQLite)
-if st.session_state.get("auth_role") == "admin":
-    st.sidebar.subheader("Admin: Role assignments")
-    st.sidebar.caption("Assign roles globally (*) or per workspace. Stored in SQLite.")
-    ws_for_role = st.sidebar.selectbox("Workspace scope", options=["*"] + sorted(_workspaces_config().keys()), index=0, key="role_editor_ws")
-    email_in = st.sidebar.text_input("User email", key="role_editor_email").strip().lower()
-    role_in = st.sidebar.selectbox("Role", options=["viewer", "editor", "reviewer", "admin"], index=0, key="role_editor_role")
+# (Role editor UI moved to sidebar after DB init)
 
-    c1, c2 = st.sidebar.columns(2)
-    if c1.button("Upsert role", use_container_width=True):
-        if not email_in or "@" not in email_in:
-            st.sidebar.error("Enter a valid email.")
-        else:
-            conn = _db()
-            conn.execute(
-                "INSERT INTO role_assignments(ts, workspace, email, role, updated_by) VALUES(?,?,?,?,?)",
-                (now_iso(), ws_for_role, email_in, role_in, st.session_state.get("auth_email", "")),
-            )
-            conn.commit()
-            conn.close()
-            log_audit(event="role_upsert", user_email=st.session_state.get("auth_email",""), workspace=st.session_state.get("workspace",""), role=st.session_state.get("auth_role",""), meta={"scope": ws_for_role, "email": email_in, "role": role_in})
-            st.sidebar.success("Saved. Refreshing…")
-            st.rerun()
-
-    if c2.button("Remove role", use_container_width=True):
-        if not email_in or "@" not in email_in:
-            st.sidebar.error("Enter a valid email.")
-        else:
-            conn = _db()
-            conn.execute(
-                "DELETE FROM role_assignments WHERE email = ? AND workspace = ?",
-                (email_in, ws_for_role),
-            )
-            conn.commit()
-            conn.close()
-            log_audit(event="role_remove", user_email=st.session_state.get("auth_email",""), workspace=st.session_state.get("workspace",""), role=st.session_state.get("auth_role",""), meta={"scope": ws_for_role, "email": email_in})
-            st.sidebar.success("Removed. Refreshing…")
-            st.rerun()
-
-    # Show recent assignments
-    try:
-        conn = _db()
-        rows = conn.execute(
-            "SELECT workspace, email, role, ts FROM role_assignments ORDER BY id DESC LIMIT 50"
-        ).fetchall()
-        conn.close()
-        if rows:
-            st.sidebar.write("Recent assignments:")
-            for ws,email,rr,ts in rows[:15]:
-                st.sidebar.caption(f"{ts} — [{ws}] {email} → {rr}")
-    except Exception:
-        pass
 
 st.session_state.workspace = _safe_workspace_key(active_workspace)
 
@@ -1878,6 +1829,79 @@ with st.sidebar:
         st.caption(f"Signed in as: {AUTH_EMAIL}")
     st.caption(f"Workspace (active): {st.session_state.get('workspace', 'default')}")
     st.caption(f"Workspace (locked): {st.session_state.get('workspace_locked', 'default')}")
+
+    # ------------------------------------------------------------
+    # Admin: Role assignments (UI) — stored in SQLite
+    # Requires _db(), now_iso(), log_audit() (defined above).
+    # ------------------------------------------------------------
+    if st.session_state.get("auth_role") == "admin":
+        st.divider()
+        st.subheader("Admin: Role assignments")
+        st.caption("Assign roles globally (*) or per workspace. Stored in SQLite.")
+
+        ws_options = ["*"] + sorted(_workspaces_config().keys())
+        ws_for_role = st.selectbox("Workspace scope", options=ws_options, index=0, key="role_editor_ws")
+
+        email_in = st.text_input("User email", key="role_editor_email").strip().lower()
+        role_in = st.selectbox("Role", options=["viewer", "editor", "reviewer", "admin"], index=0, key="role_editor_role")
+
+        c1, c2 = st.columns(2)
+        if c1.button("Upsert role", use_container_width=True):
+            if not email_in or "@" not in email_in:
+                st.error("Enter a valid email.")
+            else:
+                conn = _db()
+                conn.execute(
+                    "INSERT INTO role_assignments(ts, workspace, email, role, updated_by) VALUES(?,?,?,?,?)",
+                    (now_iso(), ws_for_role, email_in, role_in, st.session_state.get("auth_email", "")),
+                )
+                conn.commit()
+                conn.close()
+                log_audit(
+                    event="role_upsert",
+                    user_email=st.session_state.get("auth_email", ""),
+                    workspace=st.session_state.get("workspace", ""),
+                    doc_id="",
+                    meta={"scope": ws_for_role, "email": email_in, "role": role_in},
+                )
+                st.success("Saved. Refreshing…")
+                st.rerun()
+
+        if c2.button("Remove role", use_container_width=True):
+            if not email_in or "@" not in email_in:
+                st.error("Enter a valid email.")
+            else:
+                conn = _db()
+                conn.execute(
+                    "DELETE FROM role_assignments WHERE email = ? AND workspace = ?",
+                    (email_in, ws_for_role),
+                )
+                conn.commit()
+                conn.close()
+                log_audit(
+                    event="role_remove",
+                    user_email=st.session_state.get("auth_email", ""),
+                    workspace=st.session_state.get("workspace", ""),
+                    doc_id="",
+                    meta={"scope": ws_for_role, "email": email_in},
+                )
+                st.success("Removed. Refreshing…")
+                st.rerun()
+
+        # Show recent assignments (best-effort)
+        try:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT workspace, email, role, ts FROM role_assignments ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+            conn.close()
+            if rows:
+                st.caption("Recent assignments:")
+                for ws, em, rr, ts in rows[:15]:
+                    st.caption(f"{ts} — [{ws}] {em} → {rr}")
+        except Exception:
+            pass
+
 
     if hasattr(st, "logout") and st.button("Logout", use_container_width=True):
         st.logout()
