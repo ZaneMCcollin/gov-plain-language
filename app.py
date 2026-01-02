@@ -443,7 +443,6 @@ def require_login() -> str:
 
 # ============================================================
 # Resolve authenticated user (fix AUTH_EMAIL NameError)
- (fix AUTH_EMAIL NameError)
 # ============================================================
 AUTH_EMAIL = require_login() or ""
 st.session_state["auth_email"] = AUTH_EMAIL
