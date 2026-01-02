@@ -324,6 +324,28 @@ if _is_streamlit_cloud():
 
 from collections.abc import Mapping
 
+def _is_allowed(email: str) -> bool:
+    """Return True if email is allowed by ALLOWED_EMAILS or ALLOWED_DOMAINS.
+
+    Safe, deterministic, and never raises.
+    """
+    if not email or "@" not in email:
+        return False
+
+    email = email.strip().lower()
+
+    # Read allowlists
+    domains, emails = _get_allowlists()
+
+    # Explicit email allow
+    if email in emails:
+        return True
+
+    # Domain allow
+    domain = email.split("@", 1)[-1]
+    return domain in domains
+
+
 def _get_allowlists() -> Tuple[List[str], List[str]]:
     """Read allow-lists from Secrets (comma-separated strings)."""
     allowed_domains = safe_secret("ALLOWED_DOMAINS", "")
