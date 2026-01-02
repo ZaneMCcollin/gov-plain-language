@@ -442,10 +442,16 @@ def require_login() -> str:
     return auth_require_login(prod=PROD, safe_secret=safe_secret, is_streamlit_cloud=IS_STREAMLIT_CLOUD)
 
 # ============================================================
-# Resolve authenticated user (fix AUTH_EMAIL NameError)
+# Resolve authenticated user
 # ============================================================
+
 AUTH_EMAIL = require_login() or ""
 st.session_state["auth_email"] = AUTH_EMAIL
+
+# Compute effective role once per session
+if "auth_role" not in st.session_state:
+    st.session_state["auth_role"] = role_for_email(AUTH_EMAIL)
+
 
 # Compute effective role (delegates to auth.py via role_for_email wrapper)
 if "auth_role" not in st.session_state:
