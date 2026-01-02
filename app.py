@@ -668,6 +668,7 @@ def _db() -> sqlite3.Connection:
 
 def _db_init() -> None:
     conn = _db()
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS documents (
             doc_id TEXT PRIMARY KEY,
@@ -676,6 +677,7 @@ def _db_init() -> None:
             latest_version_id INTEGER
         )
     """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -727,31 +729,29 @@ def _db_init() -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ws ON audit_logs(workspace, ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_doc ON audit_logs(doc_id, ts DESC)")
 
-
-# Role assignments (optional; supports per-workspace scoping)
-conn.execute("""
-    CREATE TABLE IF NOT EXISTS role_assignments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts TEXT NOT NULL,
-        workspace TEXT NOT NULL,      -- '*' means global
-        email TEXT NOT NULL,
-        role TEXT NOT NULL,           -- admin/reviewer/editor/viewer
-        updated_by TEXT
-    )
-""")
-conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_email_ws ON role_assignments(email, workspace)")
+    # ✅ Role assignments (optional; supports per-workspace scoping)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS role_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            workspace TEXT NOT NULL,      -- '*' means global
+            email TEXT NOT NULL,
+            role TEXT NOT NULL,           -- admin/reviewer/editor/viewer
+            updated_by TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_email_ws ON role_assignments(email, workspace)")
 
     # Back-compat: older DBs may not have the new 'role' column.
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(audit_logs)").fetchall()]
         if "role" not in cols:
             conn.execute("ALTER TABLE audit_logs ADD COLUMN role TEXT")
-            conn.commit()
     except Exception:
         pass
+
     conn.commit()
     conn.close()
-
 
 _db_init()
 
