@@ -91,18 +91,32 @@ def _superadmins() -> List[str]:
     return sorted(set([e for e in emails if e]))
 
 
-def is_allowed(email: str) -> bool:
-    if not email:
+def is_allowed(email: str, safe_secret=None) -> bool:
+    """Return True if email is allowed by ALLOWED_EMAILS / ALLOWED_DOMAINS.
+
+    Reads from env vars by default; if safe_secret is provided, it will also read
+    from Streamlit secrets (Cloud-friendly).
+    """
+    if not email or "@" not in email:
         return False
     email = email.lower().strip()
 
-    allowed_domains = [d.strip().lower() for d in os.getenv("ALLOWED_DOMAINS", "").split(",") if d.strip()]
-    allowed_emails = [e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()]
+    def _get(key: str) -> str:
+        if callable(safe_secret):
+            try:
+                v = safe_secret(key, "")
+                return str(v or "")
+            except Exception:
+                return str(os.getenv(key, "") or "")
+        return str(os.getenv(key, "") or "")
+
+    allowed_domains = [d.strip().lower() for d in _get("ALLOWED_DOMAINS").split(",") if d.strip()]
+    allowed_emails = [e.strip().lower() for e in _get("ALLOWED_EMAILS").split(",") if e.strip()]
 
     if allowed_emails or allowed_domains:
         if email in allowed_emails:
             return True
-        domain = email.split("@")[-1]
+        domain = email.split("@", 1)[-1]
         return domain in allowed_domains
 
     # If allowlists not set, allow (dev-friendly); caller may hard-block in PROD.
@@ -129,7 +143,7 @@ def require_login(*, prod: bool, safe_secret, is_streamlit_cloud) -> str:
         try:
             email = _user_email()
             if email:
-                if not is_allowed(email):
+                if not is_allowed(email, safe_secret):
                     st.error("❌ You are not authorized to use this app.")
                     st.stop()
                 return email
@@ -148,7 +162,7 @@ def require_login(*, prod: bool, safe_secret, is_streamlit_cloud) -> str:
             st.error("Enter a valid email.")
             st.stop()
 
-        if not is_allowed(email):
+        if not is_allowed(email, safe_secret):
             st.error("❌ You are not authorized to use this app.")
             st.stop()
 
