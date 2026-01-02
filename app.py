@@ -318,225 +318,34 @@ if _is_streamlit_cloud():
     st.caption("Running in hosted mode. Note: local file storage (including SQLite) may not persist across reboots on Streamlit Community Cloud.")
 
 # ============================================================
+# ✅ Authentication + Allow-lists + Roles (moved to auth.py)
+# - Supports roles from env JSON string (Cloud Run-friendly)
+# - Supports SUPERADMIN_EMAIL / SUPERADMIN_EMAILS (break-glass)
+# - Supports optional per-workspace role assignments (stored in SQLite)
 # ============================================================
-# ✅ Authentication + Allow-lists + Locked roles (from Secrets)
-# ============================================================
 
-from collections.abc import Mapping
+import auth  # local module (auth.py)
 
-def _get_allowlists() -> Tuple[List[str], List[str]]:
-    """Read allow-lists from Secrets (comma-separated strings)."""
-    allowed_domains = safe_secret("ALLOWED_DOMAINS", "")
-    allowed_emails = safe_secret("ALLOWED_EMAILS", "")
-    doms = [d.strip().lower() for d in str(allowed_domains).split(",") if d.strip()]
-    ems = [e.strip().lower() for e in str(allowed_emails).split(",") if e.strip()]
-    return doms, ems
+# Resolve authenticated user
+AUTH_EMAIL = auth.require_login(
+    prod=PROD,
+    safe_secret=safe_secret,
+    is_streamlit_cloud=_is_streamlit_cloud,
+)
 
-def _normalize_email_list(x) -> List[str]:
-    if not x:
-        return []
-    if isinstance(x, str):
-        return [e.strip().lower() for e in x.split(",") if e.strip()]
-    if isinstance(x, (list, tuple)):
-        return [str(e).strip().lower() for e in x if str(e).strip()]
-    return []
-
-def _roles_config() -> Dict[str, List[str]]:
-    """
-    Reads roles from Streamlit Secrets OR Cloud Run env.
-
-    Supported formats:
-
-    A) Secrets.toml mapping (Streamlit style):
-
-        [roles]
-        admin = "a@b.com"
-        reviewer = "c@d.com"
-        editor = "e@d.com,f@g.com"
-        viewer = "h@i.com"
-
-    B) JSON string (Cloud Run env var), e.g.:
-
-        roles = '{"admin":["a@b.com"],"editor":["e@d.com"]}'
-    """
-    r = safe_secret("roles", {})
-
-    # Cloud Run env vars are strings — allow JSON.
-    if isinstance(r, str):
-        try:
-            r = json.loads(r)
-        except Exception:
-            r = {}
-
-    if not isinstance(r, Mapping):
-        return {"admin": [], "reviewer": [], "editor": [], "viewer": []}
-
-    return {
-        "admin": _normalize_email_list(r.get("admin")),
-        "reviewer": _normalize_email_list(r.get("reviewer")),
-        "editor": _normalize_email_list(r.get("editor")),
-        "viewer": _normalize_email_list(r.get("viewer")),
-    }
-
-def _superadmin_emails() -> List[str]:
-    """Emails that should ALWAYS be admin (env/secrets override)."""
-    single = (os.environ.get("SUPERADMIN_EMAIL") or safe_secret("SUPERADMIN_EMAIL", "") or "").strip()
-    multi = (os.environ.get("SUPERADMIN_EMAILS") or safe_secret("SUPERADMIN_EMAILS", "") or "").strip()
-    out: List[str] = []
-    if single:
-        out.append(single)
-    out.extend([e.strip() for e in multi.split(",") if e.strip()])
-    return [e.lower() for e in out]
-
-def role_for_email(email: str) -> str:
-    email = (email or "").strip().lower()
-
-    # ✅ Hard pin: superadmins are always admin (even if roles config is missing/broken).
-    if email and email in _superadmin_emails():
-        return "admin"
-
-    roles = _roles_config()
-
-    # priority order
-    if email and email in roles["admin"]:
-        return "admin"
-    if email and email in roles["reviewer"]:
-        return "reviewer"
-    if email and email in roles["editor"]:
-        return "editor"
-    if email and email in roles["viewer"]:
-        return "viewer"
-
-    return "viewer"  # default if not listed
-
-def _auth_missing_keys() -> List[str]:
-    """Validate Streamlit auth Secrets (supports [auth.google])."""
-    try:
-        auth = safe_secret("auth")
-        if not isinstance(auth, Mapping):
-            return ["[auth]"]
-
-        missing: List[str] = []
-
-        # required under [auth]
-        for k in ("redirect_uri", "cookie_secret", "server_metadata_url"):
-            v = auth.get(k) if hasattr(auth, "get") else auth[k]
-            if not v:
-                missing.append(f"[auth].{k}")
-
-        # required under [auth.google]
-        google = auth.get("google") if hasattr(auth, "get") else auth["google"]
-        if not isinstance(google, Mapping):
-            missing.append("[auth.google]")
-        else:
-            if not (google.get("client_id") if hasattr(google, "get") else google["client_id"]):
-                missing.append("[auth.google].client_id")
-            if not (google.get("client_secret") if hasattr(google, "get") else google["client_secret"]):
-                missing.append("[auth.google].client_secret")
-
-        return missing
-    except Exception:
-        return ["[auth]"]
-
-def _user_email() -> str:
-    try:
-        u = getattr(st, "user", None)
-        if not u:
-            return ""
-        return (getattr(u, "email", "") or "").strip().lower()
-    except Exception:
-        return ""
-
-def _is_allowed(email: str) -> bool:
-    if not email:
-        return False
-
-    email = email.lower().strip()
-
-    allowed_domains = [d.strip().lower() for d in os.getenv("ALLOWED_DOMAINS", "").split(",") if d.strip()]
-    allowed_emails = [e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()]
-
-    if email in allowed_emails:
-        return True
-
-    domain = email.split("@")[-1]
-    return domain in allowed_domains
-
-def require_login() -> str:
-    """Return the logged-in user's email (or "" if not logged in).
-
-    Priority:
-    1) If Streamlit's built-in auth (st.login/st.user) is available AND configured, use it.
-    2) Otherwise (common on Cloud Run), fall back to a simple allowlist login UI.
-    """
-    # --- A) Streamlit built-in auth path ---
-    if hasattr(st, "login") and hasattr(st, "user"):
-        missing = _auth_missing_keys()
-        if not missing:
-            try:
-                email = _user_email()
-                if email:
-                    if not _is_allowed(email):
-                        st.error("❌ You are not authorized to use this app.")
-                        st.stop()
-                    return email
-
-                # Not logged in yet
-                st.info("Please sign in to continue.")
-                st.login()
-                st.stop()
-            except Exception:
-                # If Streamlit auth throws in this runtime, fall back below.
-                pass
-        else:
-            # Only show the 'missing auth' warning on Streamlit Community Cloud.
-            if _is_streamlit_cloud():
-                st.warning("Auth is not configured correctly in Streamlit Cloud Secrets.")
-                st.caption("Missing:")
-                for k in missing:
-                    st.write(f"- {k}")
-
-    # --- B) Cloud Run / fallback allowlist login ---
-    # If allowlists are not set, do not hard-block in dev; in PROD, block.
-    allowed_emails, allowed_domains = _get_allowlists()
-    prod = str(safe_secret("PROD", "")).strip().lower() in ("1", "true", "yes", "y")
-
-    st.info("Please sign in to continue.")
-    email = st.text_input("Email", placeholder="you@example.com").strip().lower()
-    if st.button("Log in"):
-        if not email or "@" not in email:
-            st.error("Enter a valid email.")
-            st.stop()
-
-        if allowed_emails or allowed_domains:
-            if not _is_allowed(email):
-                st.error("❌ You are not authorized to use this app.")
-                st.stop()
-        else:
-            if prod:
-                # In PROD we prefer allowlists, but do not hard-brick the app if config is missing.
-                # Fall back to a one-time bootstrap login for the entered email, and warn loudly.
-                st.warning("⚠️ ALLOWED_EMAILS / ALLOWED_DOMAINS are missing. Allowing this login once (bootstrap).")
-                st.caption("Set ALLOWED_EMAILS or ALLOWED_DOMAINS in Cloud Run env vars to enforce access control.")
-
-        st.session_state["manual_auth_email"] = email
-        st.rerun()
-
-    # If already logged via fallback
-    email2 = (st.session_state.get("manual_auth_email") or "").strip().lower()
-    if email2:
-        return email2
-
-    st.stop()
-
-# ============================================================
-# Resolve authenticated user (fix AUTH_EMAIL NameError)
-# ============================================================
-AUTH_EMAIL = require_login() or ""
 st.session_state["auth_email"] = AUTH_EMAIL
-if "auth_role" not in st.session_state:
-    st.session_state["auth_role"] = role_for_email(AUTH_EMAIL)
 
+# Provisional role (no DB yet; DB overrides can apply after _db_init)
+role_info = auth.get_effective_role(
+    email=AUTH_EMAIL,
+    workspace="default",
+    safe_secret=safe_secret,
+    prod=PROD,
+    db_lookup=None,
+)
+st.session_state["auth_role"] = role_info["role"]
+st.session_state["is_global_admin"] = bool(role_info.get("is_global_admin"))
+st.session_state["break_glass_admin"] = bool(role_info.get("break_glass_admin"))
 # ============================================================
 
 # ============================================================
@@ -570,10 +379,10 @@ def _workspaces_config() -> Dict[str, Dict[str, Any]]:
         if not isinstance(cfg, Mapping):
             cfg = {"name": str(raw_key), "domains": "", "emails": ""}
         name = str(cfg.get("name", raw_key))
-        domains = _normalize_email_list(cfg.get("domains", ""))  # treat as comma list
+        domains = auth.normalize_email_list(cfg.get("domains", ""))  # treat as comma list
         # domains should be pure domains; strip anything after @
         domains = [d.split("@", 1)[-1].lower() for d in domains if d]
-        emails = _normalize_email_list(cfg.get("emails", ""))
+        emails = auth.normalize_email_list(cfg.get("emails", ""))
         out[key] = {"name": name, "domains": domains, "emails": emails}
 
     if "default" not in out:
@@ -609,7 +418,7 @@ st.session_state.workspace_locked = locked_workspace
 ENABLE_WORKSPACE_SWITCH = str(safe_secret("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1", "true", "yes")
 
 active_workspace = locked_workspace
-if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin":
+if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin" and st.session_state.get("is_global_admin", False):
     # Admin can switch workspaces for testing/support without changing allowlists
     ws_cfg = _workspaces_config()
     ws_keys = sorted(ws_cfg.keys())
@@ -625,7 +434,61 @@ if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin":
         st.session_state.pop("workspace_override", None)
         st.rerun()
 
-    active_workspace = st.session_state.get("workspace_override", locked_workspace)
+    
+active_workspace = st.session_state.get("workspace_override", locked_workspace)
+
+# Admin: Role editor (stored in SQLite)
+if st.session_state.get("auth_role") == "admin":
+    st.sidebar.subheader("Admin: Role assignments")
+    st.sidebar.caption("Assign roles globally (*) or per workspace. Stored in SQLite.")
+    ws_for_role = st.sidebar.selectbox("Workspace scope", options=["*"] + sorted(_workspaces_config().keys()), index=0, key="role_editor_ws")
+    email_in = st.sidebar.text_input("User email", key="role_editor_email").strip().lower()
+    role_in = st.sidebar.selectbox("Role", options=["viewer", "editor", "reviewer", "admin"], index=0, key="role_editor_role")
+
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("Upsert role", use_container_width=True):
+        if not email_in or "@" not in email_in:
+            st.sidebar.error("Enter a valid email.")
+        else:
+            conn = _db()
+            conn.execute(
+                "INSERT INTO role_assignments(ts, workspace, email, role, updated_by) VALUES(?,?,?,?,?)",
+                (now_iso(), ws_for_role, email_in, role_in, st.session_state.get("auth_email", "")),
+            )
+            conn.commit()
+            conn.close()
+            log_audit(event="role_upsert", user_email=st.session_state.get("auth_email",""), workspace=st.session_state.get("workspace",""), role=st.session_state.get("auth_role",""), meta={"scope": ws_for_role, "email": email_in, "role": role_in})
+            st.sidebar.success("Saved. Refreshing…")
+            st.rerun()
+
+    if c2.button("Remove role", use_container_width=True):
+        if not email_in or "@" not in email_in:
+            st.sidebar.error("Enter a valid email.")
+        else:
+            conn = _db()
+            conn.execute(
+                "DELETE FROM role_assignments WHERE email = ? AND workspace = ?",
+                (email_in, ws_for_role),
+            )
+            conn.commit()
+            conn.close()
+            log_audit(event="role_remove", user_email=st.session_state.get("auth_email",""), workspace=st.session_state.get("workspace",""), role=st.session_state.get("auth_role",""), meta={"scope": ws_for_role, "email": email_in})
+            st.sidebar.success("Removed. Refreshing…")
+            st.rerun()
+
+    # Show recent assignments
+    try:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT workspace, email, role, ts FROM role_assignments ORDER BY id DESC LIMIT 50"
+        ).fetchall()
+        conn.close()
+        if rows:
+            st.sidebar.write("Recent assignments:")
+            for ws,email,rr,ts in rows[:15]:
+                st.sidebar.caption(f"{ts} — [{ws}] {email} → {rr}")
+    except Exception:
+        pass
 
 st.session_state.workspace = _safe_workspace_key(active_workspace)
 
@@ -642,6 +505,11 @@ ROLE_PERMS = {
 
 def can(action: str) -> bool:
     role = st.session_state.get("auth_role", "viewer")
+
+    # In production, lock down editing capabilities unless admin.
+    if PROD and role != "admin" and action in {"convert", "edit_outputs", "rollback", "analytics"}:
+        return False
+
     if role == "admin":
         return True
     return action in ROLE_PERMS.get(role, set())
@@ -859,6 +727,20 @@ def _db_init() -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ws ON audit_logs(workspace, ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_doc ON audit_logs(doc_id, ts DESC)")
 
+
+# Role assignments (optional; supports per-workspace scoping)
+conn.execute("""
+    CREATE TABLE IF NOT EXISTS role_assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        workspace TEXT NOT NULL,      -- '*' means global
+        email TEXT NOT NULL,
+        role TEXT NOT NULL,           -- admin/reviewer/editor/viewer
+        updated_by TEXT
+    )
+""")
+conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_email_ws ON role_assignments(email, workspace)")
+
     # Back-compat: older DBs may not have the new 'role' column.
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(audit_logs)").fetchall()]
@@ -870,7 +752,63 @@ def _db_init() -> None:
     conn.commit()
     conn.close()
 
+
 _db_init()
+
+def _db_role_lookup(email: str, workspace: str) -> dict:
+    """Return role assignment from DB for email/workspace, if any.
+    Priority: workspace-specific, then global ('*').
+    """
+    try:
+        email = (email or "").strip().lower()
+        workspace = (workspace or "").strip().lower() or "default"
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT workspace, role
+            FROM role_assignments
+            WHERE email = ?
+              AND (workspace = ? OR workspace = '*')
+            ORDER BY CASE WHEN workspace = ? THEN 0 ELSE 1 END, id DESC
+            LIMIT 1
+            """,
+            (email, workspace, workspace),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return {}
+        ws, role = row[0], row[1]
+        return {
+            "role": role,
+            "is_global_admin": (role == "admin" and ws == "*"),
+        }
+    except Exception:
+        return {}
+
+# Refresh role after DB init (enables UI-managed role assignments)
+role_info = auth.get_effective_role(
+    email=st.session_state.get("auth_email", ""),
+    workspace=st.session_state.get("workspace", "default"),
+    safe_secret=safe_secret,
+    prod=PROD,
+    db_lookup=_db_role_lookup,
+)
+st.session_state["auth_role"] = role_info["role"]
+st.session_state["is_global_admin"] = bool(role_info.get("is_global_admin"))
+
+# Break-glass admin logging (SUPERADMIN override)
+if role_info.get("break_glass_admin") and not st.session_state.get("_break_glass_logged"):
+    st.session_state["_break_glass_logged"] = True
+    log_audit(
+        event="break_glass_admin",
+        user_email=st.session_state.get("auth_email", ""),
+        workspace=st.session_state.get("workspace", ""),
+        doc_id="",
+        role=st.session_state.get("auth_role", ""),
+        meta={"source": "SUPERADMIN_EMAILS"},
+    )
 
 def log_usage(
     action: str,
@@ -2471,5 +2409,4 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
-
 
