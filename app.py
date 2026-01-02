@@ -2441,4 +2441,34 @@ with right:
                     data=docx_bytes,
                     file_name=f"{safe_filename(st.session_state.doc_id)}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-             
+                    use_container_width=True
+                )
+                log_usage(action="export_docx", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(docx_bytes)})
+                log_audit(event="export_docx", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(docx_bytes)})
+
+        with c3:
+            if can("export"):
+                pdf_bytes = build_pdf(snap)
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_bytes,
+                    file_name=f"{safe_filename(st.session_state.doc_id)}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+                log_usage(action="export_pdf_full", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(pdf_bytes)})
+                log_audit(event="export_pdf_full", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(pdf_bytes)})
+
+        with c4:
+            if can("export"):
+                comp_pdf = build_compliance_report_pdf(snap)
+                st.download_button(
+                    "Compliance Report (PDF)",
+                    data=comp_pdf,
+                    file_name=f"{safe_filename(st.session_state.doc_id)}_compliance.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+                log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
+                log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
+
