@@ -541,8 +541,11 @@ st.session_state.workspace_locked = locked_workspace
 ENABLE_WORKSPACE_SWITCH = str(safe_secret("ENABLE_WORKSPACE_SWITCH", "false")).lower() in ("1", "true", "yes")
 
 active_workspace = locked_workspace
+
+# Admin can switch workspaces for testing/support without changing allowlists
 if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin":
-    # Admin can switch workspaces for testing/support without changing allowlists
+    pass
+
 # PROD lock: only global admins can switch workspaces.
 if can("workspace_switch") and bool(st.session_state.get("is_global_admin")):
     ws_cfg = _workspaces_config()
