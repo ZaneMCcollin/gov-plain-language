@@ -534,6 +534,36 @@ def require_login() -> str:
 # ============================================================
 # Resolve authenticated user
 # ============================================================
+def log_audit(
+    event: str,
+    user_email: str = "",
+    doc_id: str = "",
+    workspace: str = "",
+    role: str = "",
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write an audit log event to SQLite. Safe: never raises; no-op until DB is ready."""
+    try:
+        # If DB helpers aren't defined yet at import time, skip safely.
+        if "_db" not in globals():
+            return
+
+        if not role:
+            role = str(st.session_state.get("auth_role", "") or "")
+
+        conn = _db()
+        meta_json = json.dumps(meta or {}, ensure_ascii=False)
+
+        ts = datetime.now(timezone.utc).isoformat()  # ✅ avoids now_iso() ordering issues
+
+        conn.execute(
+            "INSERT INTO audit_logs(ts, user_email, role, event, workspace, doc_id, meta_json) VALUES(?,?,?,?,?,?,?)",
+            (ts, (user_email or "").lower(), (role or ""), event, workspace or "", doc_id or "", meta_json),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        return
 
 AUTH_EMAIL = require_login() or ""
 st.session_state["auth_email"] = AUTH_EMAIL
@@ -554,8 +584,6 @@ if st.session_state.get("break_glass_admin") and not st.session_state.get("_brea
         meta={"source": st.session_state.get("role_source", "")},
     )
     st.session_state["_break_glass_logged"] = True
-
-# ============================================================
 
 # ============================================================
 # ðŸ’¼ Client workspaces (multi-tenant namespace)
