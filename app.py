@@ -317,14 +317,8 @@ def _is_streamlit_cloud() -> bool:
         or os.environ.get("STREAMLIT_COMMUNITY_CLOUD")
     )
 
-# ✅ ADD THIS LINE (this is what was missing)
-IS_STREAMLIT_CLOUD = _is_streamlit_cloud()
-
-if IS_STREAMLIT_CLOUD:
-    st.caption(
-        "Running in hosted mode. Note: local file storage (including SQLite) "
-        "may not persist across reboots on Streamlit Community Cloud."
-    )
+if _is_streamlit_cloud():
+    st.caption("Running in hosted mode. Note: local file storage (including SQLite) may not persist across reboots on Streamlit Community Cloud.")
 
 # ============================================================
 # ============================================================
