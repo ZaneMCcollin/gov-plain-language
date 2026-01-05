@@ -943,29 +943,55 @@ def log_usage(
     except Exception:
         return
 
+# ============================================================
+# Audit logging (safe default)
+# ============================================================
+
 def log_audit(
     event: str,
-    user_email: str = "",
+    user_email: str,
+    workspace: str,
     doc_id: str = "",
-    workspace: str = "",
-    role: str = "",
     meta: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Write an audit log event to SQLite (includes role). Safe: never raises."""
+):
+    """
+    Record an audit event. Fails safely if DB/table is unavailable.
+    """
     try:
-        if not role:
-            # Best-effort: pull the effective app role.
-            role = str(st.session_state.get("auth_role", "") or "")
-        conn = _db()
-        meta_json = json.dumps(meta or {}, ensure_ascii=False)
-        conn.execute(
-            "INSERT INTO audit_logs(ts, user_email, role, event, workspace, doc_id, meta_json) VALUES(?,?,?,?,?,?,?)",
-            (now_iso(), (user_email or "").lower(), (role or ""), event, workspace or "", doc_id or "", meta_json),
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                event TEXT NOT NULL,
+                user_email TEXT,
+                workspace TEXT,
+                doc_id TEXT,
+                meta TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO audit_log (ts, event, user_email, workspace, doc_id, meta)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                event,
+                user_email,
+                workspace,
+                doc_id,
+                json.dumps(meta or {}),
+            ),
         )
         conn.commit()
-        conn.close()
     except Exception:
-        return
+        # Audit logging must never crash the app
+        pass
+
 
 # --- deferred login audit (ensures log_audit is defined + DB initialized) ---
 if AUTH_EMAIL and not st.session_state.get("_logged_login_success"):
