@@ -973,54 +973,6 @@ def log_usage(
 # ============================================================
 # Audit logging (safe default)
 # ============================================================
-
-def log_audit(
-    event: str,
-    user_email: str,
-    workspace: str,
-    doc_id: str = "",
-    meta: Optional[Dict[str, Any]] = None,
-):
-    """
-    Record an audit event. Fails safely if DB/table is unavailable.
-    """
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts TEXT NOT NULL,
-                event TEXT NOT NULL,
-                user_email TEXT,
-                workspace TEXT,
-                doc_id TEXT,
-                meta TEXT
-            )
-            """
-        )
-        cur.execute(
-            """
-            INSERT INTO audit_log (ts, event, user_email, workspace, doc_id, meta)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                datetime.now(timezone.utc).isoformat(),
-                event,
-                user_email,
-                workspace,
-                doc_id,
-                json.dumps(meta or {}),
-            ),
-        )
-        conn.commit()
-    except Exception:
-        # Audit logging must never crash the app
-        pass
-
-
-# --- deferred login audit (ensures log_audit is defined + DB initialized) ---
 if AUTH_EMAIL and not st.session_state.get("_logged_login_success"):
     try:
         log_audit(
