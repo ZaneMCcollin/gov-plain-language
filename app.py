@@ -317,7 +317,11 @@ def _is_streamlit_cloud() -> bool:
         or os.environ.get("STREAMLIT_COMMUNITY_CLOUD")
     )
 
-if _is_streamlit_cloud():
+
+# Resolve once (used by auth)
+IS_STREAMLIT_CLOUD = _is_streamlit_cloud()
+
+if IS_STREAMLIT_CLOUD:
     st.caption("Running in hosted mode. Note: local file storage (including SQLite) may not persist across reboots on Streamlit Community Cloud.")
 
 # ============================================================
@@ -406,6 +410,92 @@ def _superadmin_emails() -> List[str]:
     # de-dupe
     return sorted({e for e in out if e})
 
+def _ensure_role_tables(conn: sqlite3.Connection) -> None:
+    """Ensure role tables exist. Safe to call early (before full _db_init)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS role_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            workspace TEXT NOT NULL,      -- '*' means global
+            email TEXT NOT NULL,
+            role TEXT NOT NULL,           -- admin/reviewer/editor/viewer
+            updated_by TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_email_ws ON role_assignments(email, workspace)")
+    conn.commit()
+
+def _db_role_lookup(email: str, workspace: str) -> Optional[str]:
+    """Return most recent role for (email, workspace) or global ('*')."""
+    email = (email or "").strip().lower()
+    ws = (workspace or "").strip() or "default"
+    if not email:
+        return None
+    try:
+        os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
+        conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
+        _ensure_role_tables(conn)
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT role FROM role_assignments WHERE email = ? AND workspace = ? ORDER BY id DESC LIMIT 1",
+            (email, ws),
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            conn.close()
+            return str(row[0])
+
+        cur.execute(
+            "SELECT role FROM role_assignments WHERE email = ? AND workspace = '*' ORDER BY id DESC LIMIT 1",
+            (email,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return str(row[0]) if row and row[0] else None
+    except Exception:
+        return None
+
+def _set_role_assignment(workspace: str, email: str, role: str, updated_by: str = "") -> None:
+    """Persist a role assignment (safe; never raises)."""
+    ws = (workspace or "").strip() or "default"
+    em = (email or "").strip().lower()
+    rl = (role or "").strip().lower() or "viewer"
+    if not em:
+        return
+    try:
+        os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
+        conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
+        _ensure_role_tables(conn)
+        conn.execute(
+            "INSERT INTO role_assignments(ts, workspace, email, role, updated_by) VALUES(?,?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(), ws, em, rl, (updated_by or "").strip().lower()),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        return
+
+def _list_role_assignments(limit: int = 50) -> List[Dict[str, Any]]:
+    """Return latest role assignments for admin UI."""
+    try:
+        os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
+        conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
+        _ensure_role_tables(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT ts, workspace, email, role, updated_by FROM role_assignments ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        )
+        rows = cur.fetchall() or []
+        conn.close()
+        return [
+            {"ts": r[0], "workspace": r[1], "email": r[2], "role": r[3], "updated_by": r[4]}
+            for r in rows
+        ]
+    except Exception:
+        return []
+
 def role_for_email(email: str) -> str:
     """Back-compat wrapper: returns role string for the given email.
     Real resolution is handled by auth.py (supports SUPERADMIN + config roles + optional DB lookup).
@@ -452,10 +542,6 @@ st.session_state["auth_email"] = AUTH_EMAIL
 if "auth_role" not in st.session_state:
     st.session_state["auth_role"] = role_for_email(AUTH_EMAIL)
 
-
-# Compute effective role (delegates to auth.py via role_for_email wrapper)
-if "auth_role" not in st.session_state:
-    st.session_state["auth_role"] = role_for_email(AUTH_EMAIL)
 
 # Break-glass audit (SUPERADMIN_EMAIL(S) override)
 if st.session_state.get("break_glass_admin") and not st.session_state.get("_break_glass_logged"):
@@ -2456,4 +2542,5 @@ with right:
                 )
                 log_usage(action="export_pdf_compliance", user_email=AUTH_EMAIL, doc_id=scoped_doc_id(st.session_state.doc_id, st.session_state.workspace), model="", meta={"bytes": len(comp_pdf)})
                 log_audit(event="export_pdf_compliance", user_email=AUTH_EMAIL, workspace=st.session_state.workspace, doc_id=st.session_state.doc_id, meta={"bytes": len(comp_pdf)})
+
 
