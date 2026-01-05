@@ -539,7 +539,7 @@ def log_audit(
     user_email: str = "",
     doc_id: str = "",
     workspace: str = "",
-    role: str = "",
+    role: str = "",  # ✅ add this
     meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Write an audit log event to SQLite. Safe: never raises; no-op until DB is ready."""
@@ -553,8 +553,7 @@ def log_audit(
 
         conn = _db()
         meta_json = json.dumps(meta or {}, ensure_ascii=False)
-
-        ts = datetime.now(timezone.utc).isoformat()  # ✅ avoids now_iso() ordering issues
+        ts = datetime.now(timezone.utc).isoformat()
 
         conn.execute(
             "INSERT INTO audit_logs(ts, user_email, role, event, workspace, doc_id, meta_json) VALUES(?,?,?,?,?,?,?)",
