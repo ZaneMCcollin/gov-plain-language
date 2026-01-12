@@ -32,6 +32,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
+# Modularized helpers
+from roles import (
+    normalize_email_list as roles_normalize_email_list,
+    db_role_lookup as roles_db_role_lookup,
+    set_role_assignment as roles_set_role_assignment,
+    list_role_assignments as roles_list_role_assignments,
+    ROLE_PERMS,
+    can_action as roles_can_action,
+)
+from audit import log_audit as audit_log_audit, render_audit_viewer
+from migrations import apply_migrations, default_migrations
+from selfcheck import startup_self_check
+
 # Auth/roles helpers (separated module)
 from auth import require_login as auth_require_login, get_effective_role as auth_get_effective_role
 import os
@@ -179,7 +192,7 @@ def _bootstrap_project_files() -> None:
             "COPY requirements.txt /app/requirements.txt",
             "RUN pip install --no-cache-dir -r requirements.txt",
             "",
-            "COPY app.py /app/app.py",
+            "COPY . /app",
             "",
             "ENV PORT=8080",
             "EXPOSE 8080",
@@ -298,6 +311,14 @@ DEBUG = (not PROD) and (
     in ("1", "true", "yes")
 )
 
+# FORCE_PROD_ON_CLOUD_RUN: on Cloud Run, default to PROD unless explicitly set false
+if os.environ.get("K_SERVICE") and not (os.environ.get("PROD") or safe_secret("PROD", "")):
+    PROD = True
+
+# In PROD, DEBUG is always false
+if PROD:
+    DEBUG = False
+
 # ============================================================
 # Page config
 # ============================================================
@@ -324,6 +345,30 @@ IS_STREAMLIT_CLOUD = _is_streamlit_cloud()
 if IS_STREAMLIT_CLOUD:
     st.caption("Running in hosted mode. Note: local file storage (including SQLite) may not persist across reboots on Streamlit Community Cloud.")
 
+
+# Startup self-check (duplicates + risky flags)
+if not st.session_state.get("_startup_selfcheck_done"):
+    _rep = startup_self_check(
+        st=st,
+        safe_secret=safe_secret,
+        prod=PROD,
+        is_cloud_run=bool(os.environ.get("K_SERVICE")),
+    )
+    # Log warnings to audit for traceability
+    if _rep.get("warnings"):
+        try:
+            audit_log_audit(
+                db=_db,
+                event="startup_selfcheck_warning",
+                user_email=_user_email(),
+                workspace=str(st.session_state.get("workspace", "default") or "default"),
+                role=str(st.session_state.get("auth_role", "") or ""),
+                meta={"warnings": _rep.get("warnings")},
+            )
+        except Exception:
+            pass
+    st.session_state["_startup_selfcheck_done"] = True
+
 # ============================================================
 # ============================================================
 # ✅ Authentication + Allow-lists + Locked roles (from Secrets)
@@ -340,13 +385,7 @@ def _get_allowlists() -> Tuple[List[str], List[str]]:
     return doms, ems
 
 def _normalize_email_list(x) -> List[str]:
-    if not x:
-        return []
-    if isinstance(x, str):
-        return [e.strip().lower() for e in x.split(",") if e.strip()]
-    if isinstance(x, (list, tuple)):
-        return [str(e).strip().lower() for e in x if str(e).strip()]
-    return []
+    return roles_normalize_email_list(x)
 
 def _roles_config() -> Dict[str, List[str]]:
     """
@@ -411,90 +450,22 @@ def _superadmin_emails() -> List[str]:
     return sorted({e for e in out if e})
 
 def _ensure_role_tables(conn: sqlite3.Connection) -> None:
-    """Ensure role tables exist. Safe to call early (before full _db_init)."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS role_assignments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            workspace TEXT NOT NULL,      -- '*' means global
-            email TEXT NOT NULL,
-            role TEXT NOT NULL,           -- admin/reviewer/editor/viewer
-            updated_by TEXT
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_email_ws ON role_assignments(email, workspace)")
-    conn.commit()
+    # Back-compat wrapper (delegates to roles.py)
+    from roles import ensure_role_tables as _impl
+    _impl(conn)
+
 
 def _db_role_lookup(email: str, workspace: str) -> Optional[str]:
-    """Return most recent role for (email, workspace) or global ('*')."""
-    email = (email or "").strip().lower()
-    ws = (workspace or "").strip() or "default"
-    if not email:
-        return None
-    try:
-        os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
-        conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
-        _ensure_role_tables(conn)
-        cur = conn.cursor()
+    return roles_db_role_lookup(SQLITE_PATH, email, workspace)
 
-        cur.execute(
-            "SELECT role FROM role_assignments WHERE email = ? AND workspace = ? ORDER BY id DESC LIMIT 1",
-            (email, ws),
-        )
-        row = cur.fetchone()
-        if row and row[0]:
-            conn.close()
-            return str(row[0])
-
-        cur.execute(
-            "SELECT role FROM role_assignments WHERE email = ? AND workspace = '*' ORDER BY id DESC LIMIT 1",
-            (email,),
-        )
-        row = cur.fetchone()
-        conn.close()
-        return str(row[0]) if row and row[0] else None
-    except Exception:
-        return None
 
 def _set_role_assignment(workspace: str, email: str, role: str, updated_by: str = "") -> None:
-    """Persist a role assignment (safe; never raises)."""
-    ws = (workspace or "").strip() or "default"
-    em = (email or "").strip().lower()
-    rl = (role or "").strip().lower() or "viewer"
-    if not em:
-        return
-    try:
-        os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
-        conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
-        _ensure_role_tables(conn)
-        conn.execute(
-            "INSERT INTO role_assignments(ts, workspace, email, role, updated_by) VALUES(?,?,?,?,?)",
-            (datetime.now(timezone.utc).isoformat(), ws, em, rl, (updated_by or "").strip().lower()),
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        return
+    roles_set_role_assignment(SQLITE_PATH, workspace, email, role, updated_by=updated_by)
+
 
 def _list_role_assignments(limit: int = 50) -> List[Dict[str, Any]]:
-    """Return latest role assignments for admin UI."""
-    try:
-        os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
-        conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
-        _ensure_role_tables(conn)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT ts, workspace, email, role, updated_by FROM role_assignments ORDER BY id DESC LIMIT ?",
-            (int(limit),),
-        )
-        rows = cur.fetchall() or []
-        conn.close()
-        return [
-            {"ts": r[0], "workspace": r[1], "email": r[2], "role": r[3], "updated_by": r[4]}
-            for r in rows
-        ]
-    except Exception:
-        return []
+    return roles_list_role_assignments(SQLITE_PATH, limit=limit)
+
 
 def role_for_email(email: str) -> str:
     """Back-compat wrapper: returns role string for the given email.
@@ -539,28 +510,20 @@ def log_audit(
     user_email: str = "",
     doc_id: str = "",
     workspace: str = "",
-    role: str = "",  # ✅ add this
+    role: str = "",
     meta: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Write an audit log event to SQLite. Safe: never raises; no-op until DB is ready."""
+    """Audit log wrapper (delegates to audit.py)."""
     try:
-        # If DB helpers aren't defined yet at import time, skip safely.
-        if "_db" not in globals():
-            return
-
-        if not role:
-            role = str(st.session_state.get("auth_role", "") or "")
-
-        conn = _db()
-        meta_json = json.dumps(meta or {}, ensure_ascii=False)
-        ts = datetime.now(timezone.utc).isoformat()
-
-        conn.execute(
-            "INSERT INTO audit_logs(ts, user_email, role, event, workspace, doc_id, meta_json) VALUES(?,?,?,?,?,?,?)",
-            (ts, (user_email or "").lower(), (role or ""), event, workspace or "", doc_id or "", meta_json),
+        audit_log_audit(
+            db=_db,
+            event=event,
+            user_email=user_email,
+            doc_id=doc_id,
+            workspace=workspace,
+            role=role or str(st.session_state.get("auth_role", "") or ""),
+            meta=meta,
         )
-        conn.commit()
-        conn.close()
     except Exception:
         return
 
@@ -656,7 +619,7 @@ ENABLE_WORKSPACE_SWITCH = str(safe_secret("ENABLE_WORKSPACE_SWITCH", "false")).l
 active_workspace = locked_workspace
 
 # PROD lock: only global admins can switch workspaces.
-if ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin" and bool(st.session_state.get("is_global_admin")):
+if (not PROD) and DEBUG and ENABLE_WORKSPACE_SWITCH and st.session_state.get("auth_role") == "admin" and bool(st.session_state.get("is_global_admin")):
     ws_cfg = _workspaces_config()
     ws_keys = sorted(ws_cfg.keys())
     st.sidebar.divider()
@@ -679,30 +642,22 @@ st.session_state.workspace = _safe_workspace_key(active_workspace)
 # Auth roles / permissions
 # ============================================================
 
-ROLE_PERMS = {
-    "admin":    {"convert", "export", "approve", "edit_outputs", "rollback", "analytics"},
-    "reviewer": {"export", "approve", "edit_outputs"},
-    "editor":   {"convert", "export", "edit_outputs"},
-    "viewer":   set(),
-}
-
 def can(action: str) -> bool:
-    role = st.session_state.get("auth_role", "viewer")
-    prod = str(os.getenv("PROD", "false")).lower() == "true"
+    role = str(st.session_state.get("auth_role", "viewer") or "viewer").lower()
 
-    # Admin can do everything
-    if role == "admin":
-        return True
+    # Cloud Run prod is the strictest
+    prod = bool(PROD)
 
-    # Harder PROD lock: only admin can use editor/admin-only capabilities
-    if prod and action in {"convert", "edit_outputs", "rollback", "analytics", "role_admin", "workspace_switch"}:
+    # Lock dangerous switches in PROD regardless of flags
+    if prod and action in {"role_admin", "workspace_switch"}:
         return False
 
-    return action in ROLE_PERMS.get(role, set())
+    return roles_can_action(role=role, prod=prod, action=action)
 
 
 # ============================================================
 # Gemini client
+
 
 # ============================================================
 api_key = safe_secret("GEMINI_API_KEY", "")
@@ -855,6 +810,8 @@ def _db() -> sqlite3.Connection:
 
 def _db_init() -> None:
     conn = _db()
+    # DB migrations for audit/roles tables
+    apply_migrations(conn, default_migrations())
     conn.execute("""
         CREATE TABLE IF NOT EXISTS documents (
             doc_id TEXT PRIMARY KEY,
@@ -894,47 +851,6 @@ def _db_init() -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(user_email, ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_doc ON usage_events(doc_id, ts DESC)")
-
-    # Audit logs (security + traceability)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            user_email TEXT,
-            role TEXT,
-            event TEXT NOT NULL,
-            workspace TEXT,
-            doc_id TEXT,
-            meta_json TEXT
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_email, ts DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_role ON audit_logs(role, ts DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ws ON audit_logs(workspace, ts DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_doc ON audit_logs(doc_id, ts DESC)")
-
-    # Role assignments (admin UI, per-workspace scoping)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS role_assignments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            workspace TEXT NOT NULL,      -- '*' means global
-            email TEXT NOT NULL,
-            role TEXT NOT NULL,           -- admin/reviewer/editor/viewer
-            updated_by TEXT
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_email_ws ON role_assignments(email, workspace)")
-
-    # Back-compat: older DBs may not have the new 'role' column.
-    try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(audit_logs)").fetchall()]
-        if "role" not in cols:
-            conn.execute("ALTER TABLE audit_logs ADD COLUMN role TEXT")
-            conn.commit()
-    except Exception:
-        pass
     conn.commit()
     conn.close()
 
@@ -2099,6 +2015,14 @@ with st.sidebar:
                 st.write(f"- {email or '(unknown)'} | events={cnt} | tokens={int(tin)+int(tout)}")
 
         csv_bytes = analytics_export_csv(days=days)
+
+        st.divider()
+
+    # ✅ Admin Audit Log Viewer (security trace)
+    if can("audit_view"):
+        with st.expander("Admin: Audit Viewer", expanded=False):
+            render_audit_viewer(st, db=_db, current_workspace=str(st.session_state.get("workspace","default") or "default"))
+
         st.download_button(
             "Download usage CSV",
             data=csv_bytes,
@@ -2106,71 +2030,6 @@ with st.sidebar:
             mime="text/csv",
             use_container_width=True
         )
-
-        # ðŸ§¾ Admin Audit Logs (security trace)
-        st.divider()
-        st.subheader("Audit Logs")
-
-        ws_filter_mode = st.selectbox("Workspace scope", ["Current workspace", "All workspaces"], index=0)
-        audit_days = st.slider("Audit lookback (days)", 1, 180, 30, key="audit_days")
-        q_user = st.text_input("Filter: user email contains", value="", key="audit_user_contains")
-        q_role = st.text_input("Filter: role contains", value="", key="audit_role_contains")
-        q_event = st.text_input("Filter: event contains", value="", key="audit_event_contains")
-        max_rows = st.slider("Rows to show", 50, 500, 200, key="audit_max_rows")
-
-        def audit_query(days: int, workspace: str, all_workspaces: bool, user_contains: str, role_contains: str, event_contains: str, limit: int):
-            since = (datetime.now(timezone.utc).timestamp() - days * 86400)
-            since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
-            conn = _db()
-            cur = conn.cursor()
-            sql = "SELECT ts, user_email, role, event, workspace, doc_id, meta_json FROM audit_logs WHERE ts >= ?"
-            params: List[Any] = [since_iso]
-            if not all_workspaces:
-                sql += " AND workspace = ?"
-                params.append(workspace or "default")
-            if user_contains.strip():
-                sql += " AND lower(user_email) LIKE ?"
-                params.append(f"%{user_contains.strip().lower()}%")
-            if role_contains.strip():
-                sql += " AND lower(role) LIKE ?"
-                params.append(f"%{role_contains.strip().lower()}%")
-            if event_contains.strip():
-                sql += " AND lower(event) LIKE ?"
-                params.append(f"%{event_contains.strip().lower()}%")
-            sql += " ORDER BY ts DESC LIMIT ?"
-            params.append(int(limit))
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall() or []
-            conn.close()
-            return since_iso, rows
-
-        all_ws = (ws_filter_mode == "All workspaces")
-        since_iso, rows = audit_query(audit_days, st.session_state.get("workspace","default"), all_ws, q_user, q_role, q_event, max_rows)
-        st.caption(f"Showing up to {max_rows} rows since {since_iso}")
-
-        if rows:
-            # Render a lightweight table
-            st.dataframe(
-                [{"ts": r[0], "user": r[1], "role": r[2], "event": r[3], "workspace": r[4], "doc_id": r[5], "meta": r[6]} for r in rows],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            # CSV export
-            out = io.StringIO()
-            w = csv.writer(out)
-            w.writerow(["ts", "user_email", "role", "event", "workspace", "doc_id", "meta_json"])
-            for r in rows:
-                w.writerow(list(r))
-            st.download_button(
-                "Download audit CSV (shown rows)",
-                data=out.getvalue().encode("utf-8"),
-                file_name=f"audit_logs_{'all' if all_ws else st.session_state.get('workspace','default')}_{audit_days}d.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        else:
-            st.info("No audit logs found for these filters.")
 
 # ============================================================
 # Main UI
