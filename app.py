@@ -274,8 +274,14 @@ OCR_LOW_CONF = int(os.environ.get("OCR_LOW_CONF", "60"))
 OCR_MED_CONF = int(os.environ.get("OCR_MED_CONF", "80"))
 
 BILLING_RATE_PER_1K = float(os.environ.get("BILLING_RATE_PER_1K", "0") or "0")
-BILLING_MODEL = (os.environ.get("BILLING_MODEL", "per_doc") or "per_doc").strip().lower()
-BILLING_PRICE_PER_DOC = float(os.environ.get("BILLING_PRICE_PER_DOC", os.environ.get("BILLING_PRICE_PER_DOC_CAD", "25")) or "25")
+
+# Option A billing (per document)
+BILLING_PRICE_PER_DOC = float(os.environ.get("BILLING_PRICE_PER_DOC", "25") or "25")
+BILLING_CURRENCY = (os.environ.get("BILLING_CURRENCY", "CAD") or "CAD").strip()
+BILLING_MONTHLY_DOC_CAP = int(os.environ.get("BILLING_MONTHLY_DOC_CAP", "0") or "0")  # 0 = unlimited
+BILLING_VENDOR_NAME = (os.environ.get("BILLING_VENDOR_NAME", "GovCan Plain Language Converter") or "GovCan Plain Language Converter").strip()
+BILLING_VENDOR_CONTACT = (os.environ.get("BILLING_VENDOR_CONTACT", "") or "").strip()
+
 
 # ============================================================
 # ENV FLAGS (define PROD before using it)
@@ -767,6 +773,72 @@ def money_estimate(tokens_total: int) -> float:
         return 0.0
     return round((tokens_total / 1000.0) * BILLING_RATE_PER_1K, 6)
 
+def _month_range_utc(dt: datetime) -> tuple[str, str]:
+    """Return (start_iso, end_iso) for the UTC month containing dt."""
+    start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    # next month
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return start.isoformat(), end.isoformat()
+
+
+BILLABLE_ACTIONS = ("save_version_after_convert", "save_version_after_review")
+
+
+def billable_docs_count_range(start_iso: str, end_iso: str) -> int:
+    """System-wide billable docs: distinct doc_id with a billable action in [start, end)."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT COUNT(DISTINCT doc_id)
+        FROM usage_events
+        WHERE ts >= ? AND ts < ?
+          AND action IN ({','.join(['?']*len(BILLABLE_ACTIONS))})
+          AND doc_id IS NOT NULL AND doc_id <> ''
+        """,
+        (start_iso, end_iso, *BILLABLE_ACTIONS),
+    )
+    n = cur.fetchone()[0] if cur.fetchone is not None else 0
+    conn.close()
+    return int(n or 0)
+
+
+def billable_docs_breakdown_by_workspace(start_iso: str, end_iso: str) -> list[tuple[str, int]]:
+    """Return list of (workspace, distinct_docs) for the invoice period."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT doc_id
+        FROM usage_events
+        WHERE ts >= ? AND ts < ?
+          AND action IN ({','.join(['?']*len(BILLABLE_ACTIONS))})
+          AND doc_id IS NOT NULL AND doc_id <> ''
+        """,
+        (start_iso, end_iso, *BILLABLE_ACTIONS),
+    )
+    rows = cur.fetchall() or []
+    conn.close()
+    # Parse workspace from scoped doc_id: "workspace::doc"
+    seen = set()
+    per_ws = {}
+    for (doc_id,) in rows:
+        if not doc_id:
+            continue
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        ws = "default"
+        if "::" in doc_id:
+            ws = doc_id.split("::", 1)[0] or "default"
+        per_ws[ws] = per_ws.get(ws, 0) + 1
+    out = sorted(per_ws.items(), key=lambda x: (-x[1], x[0]))
+    return out
+
+
 def analytics_summary(days: int = 30) -> Dict[str, Any]:
     since = (datetime.now(timezone.utc).timestamp() - days * 86400)
     since_iso = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
@@ -788,6 +860,19 @@ def analytics_summary(days: int = 30) -> Dict[str, Any]:
     row = cur.fetchone() or (0, 0, 0)
     total_events, tin, tout = row[0], row[1], row[2]
 
+    # Billable docs in lookback window (system-wide)
+    cur.execute(
+        f"""
+        SELECT COUNT(DISTINCT doc_id)
+        FROM usage_events
+        WHERE ts >= ?
+          AND action IN ({','.join(['?']*len(BILLABLE_ACTIONS))})
+          AND doc_id IS NOT NULL AND doc_id <> ''
+        """,
+        (since_iso, *BILLABLE_ACTIONS),
+    )
+    billable_docs = int((cur.fetchone() or (0,))[0] or 0)
+
     cur.execute(
         """
         SELECT user_email,
@@ -804,46 +889,21 @@ def analytics_summary(days: int = 30) -> Dict[str, Any]:
     )
     per_user = cur.fetchall() or []
 
-    # Billable documents: count distinct doc_id for "save" actions (preferred),
-    # fall back to any conversion activity if no saved events exist.
-    cur.execute(
-        """
-        SELECT COUNT(DISTINCT doc_id)
-        FROM usage_events
-        WHERE ts >= ?
-          AND COALESCE(doc_id,'') <> ''
-          AND action IN ('save_version_after_convert','save_version_after_review')
-        """,
-        (since_iso,),
-    )
-    billable_docs = int((cur.fetchone() or [0])[0] or 0)
-
-    if billable_docs == 0:
-        cur.execute(
-            """
-            SELECT COUNT(DISTINCT doc_id)
-            FROM usage_events
-            WHERE ts >= ?
-              AND COALESCE(doc_id,'') <> ''
-              AND action IN ('llm_convert','llm_reprompt_en')
-            """,
-            (since_iso,),
-        )
-        billable_docs = int((cur.fetchone() or [0])[0] or 0)
-
     conn.close()
-    return {
 
+    tokens_total = int((tin or 0) + (tout or 0))
+    return {
         "since_iso": since_iso,
         "total_events": int(total_events or 0),
         "tokens_in": int(tin or 0),
         "tokens_out": int(tout or 0),
-        "tokens_total": int((tin or 0) + (tout or 0)),
-        "estimated_cost": money_estimate(int((tin or 0) + (tout or 0))),
-        "billable_docs": int(billable_docs or 0),
-        "estimated_cost_docs": round(float(BILLING_PRICE_PER_DOC) * float(billable_docs or 0), 2),
+        "tokens_total": tokens_total,
+        "estimated_cost": money_estimate(tokens_total),  # token-based (optional)
+        "billable_docs": billable_docs,
+        "estimated_cost_docs": round(billable_docs * float(BILLING_PRICE_PER_DOC), 2),
         "per_user": per_user,
     }
+
 
 def analytics_export_csv(days: int = 30) -> bytes:
     since = (datetime.now(timezone.utc).timestamp() - days * 86400)
@@ -2119,25 +2179,63 @@ with st.sidebar:
         summ = analytics_summary(days=days)
         st.caption(f"Since: {summ['since_iso']}")
         st.write(f"Events: **{summ['total_events']}**")
-        st.write(f"Documents processed (billable): **{summ.get('billable_docs', 0)}**")
-        st.write(f"Estimated cost (@ ${BILLING_PRICE_PER_DOC:.2f}/doc): **${summ.get('estimated_cost_docs', 0):.2f} CAD**")
+        st.write(f"Documents processed (billable): **{summ.get('billable_docs',0)}**")
+        st.write(f"Estimated cost (@ {BILLING_CURRENCY} {BILLING_PRICE_PER_DOC:.2f} / doc): **{BILLING_CURRENCY} {summ.get('estimated_cost_docs',0):.2f}**")
 
-        with st.expander("Token diagnostics (admin)"):
+        with st.expander('Token diagnostics (admin)', expanded=False):
             st.write(f"Tokens (in/out): **{summ['tokens_in']} / {summ['tokens_out']}**  | Total: **{summ['tokens_total']}**")
             if BILLING_RATE_PER_1K > 0:
-                st.write(f"Token-based estimate (@ {BILLING_RATE_PER_1K}/1K): **{summ['estimated_cost']}**")
+                st.write(f"Estimated token cost (@ {BILLING_RATE_PER_1K}/1K): **{summ['estimated_cost']}**")
+            else:
+                st.caption('Tip: set env BILLING_RATE_PER_1K to show token cost estimate (optional).')
 
-        if summ["per_user"]:
-            st.caption("Top users (by tokens):")
-            for (email, cnt, tin, tout) in summ["per_user"][:10]:
+        if summ['per_user']:
+            st.caption('Top users (by tokens):')
+            for (email, cnt, tin, tout) in summ['per_user'][:10]:
                 st.write(f"- {email or '(unknown)'} | events={cnt} | tokens={int(tin)+int(tout)}")
 
         csv_bytes = analytics_export_csv(days=days)
         st.download_button(
-            "Download usage CSV",
+            'Download usage CSV',
             data=csv_bytes,
             file_name=f"usage_events_last_{days}_days.csv",
-            mime="text/csv",
+            mime='text/csv',
+            use_container_width=True
+        )
+
+        # Billing controls (Option A: per document)
+        st.divider()
+        st.subheader('Billing')
+
+        now = datetime.now(timezone.utc)
+        m_start, m_end = _month_range_utc(now)
+        used_this_month = billable_docs_count_range(m_start, m_end)
+        if BILLING_MONTHLY_DOC_CAP and BILLING_MONTHLY_DOC_CAP > 0:
+            remaining = max(0, int(BILLING_MONTHLY_DOC_CAP) - int(used_this_month))
+            st.write(f"Monthly cap (system-wide): **{used_this_month} / {BILLING_MONTHLY_DOC_CAP}** (remaining: **{remaining}**)")
+            if remaining <= 0:
+                st.error('Monthly cap reached. Billable saves are disabled until next month or cap is raised.')
+        else:
+            st.write(f"This month (system-wide) billable documents: **{used_this_month}**")
+
+        st.caption('Invoice summary is an estimate generated from saved document versions (billable actions).')
+        inv_period = st.selectbox('Invoice period', ['This month (UTC)', 'Last 30 days', 'Last 7 days'], index=0)
+        if inv_period == 'This month (UTC)':
+            start_iso, end_iso = m_start, m_end
+        else:
+            end_iso = datetime.now(timezone.utc).isoformat()
+            delta = 7 if inv_period == 'Last 7 days' else 30
+            start_iso = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - delta*86400, tz=timezone.utc).isoformat()
+
+        inv_docs = billable_docs_count_range(start_iso, end_iso)
+        inv_total = round(inv_docs * float(BILLING_PRICE_PER_DOC), 2)
+        st.write(f"Invoice estimate: **{inv_docs} docs × {BILLING_CURRENCY} {BILLING_PRICE_PER_DOC:.2f} = {BILLING_CURRENCY} {inv_total:.2f}**")
+        inv_pdf = build_invoice_pdf_summary(start_iso, end_iso)
+        st.download_button(
+            'Download invoice summary PDF',
+            data=inv_pdf,
+            file_name=f"invoice_summary_{start_iso[:10]}_to_{end_iso[:10]}.pdf",
+            mime='application/pdf',
             use_container_width=True
         )
 
@@ -2290,7 +2388,20 @@ with left:
         st.write(meta)
 
     convert_disabled = (not can("convert")) or (not st.session_state.doc_id) or (not user_text.strip())
-    convert_btn = st.button("Convert & Save Version", type="primary", disabled=convert_disabled)
+    # Billing warning + monthly cap enforcement (system-wide)
+    now = datetime.now(timezone.utc)
+    m_start, m_end = _month_range_utc(now)
+    used_this_month = billable_docs_count_range(m_start, m_end)
+    cap_reached = (BILLING_MONTHLY_DOC_CAP and BILLING_MONTHLY_DOC_CAP > 0 and used_this_month >= BILLING_MONTHLY_DOC_CAP)
+    if cap_reached:
+        st.error("Monthly billable document cap reached. You can still review/export, but cannot save a new billable version until next month or cap is raised.")
+    ack = st.checkbox(
+        f"This action will count as 1 billable document (@ {BILLING_CURRENCY} {BILLING_PRICE_PER_DOC:.2f} / doc).",
+        value=False,
+        key="billable_ack_convert",
+        disabled=cap_reached,
+    )
+    convert_btn = st.button("Convert & Save Version", type="primary", disabled=(convert_disabled or cap_reached or (not ack)))
 
 with right:
     if convert_btn:
@@ -2489,7 +2600,20 @@ with right:
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            if st.button("Save changes as new version", disabled=not st.session_state.doc_id):
+                        # Billing warning + monthly cap enforcement (system-wide)
+            now = datetime.now(timezone.utc)
+            m_start, m_end = _month_range_utc(now)
+            used_this_month = billable_docs_count_range(m_start, m_end)
+            cap_reached = (BILLING_MONTHLY_DOC_CAP and BILLING_MONTHLY_DOC_CAP > 0 and used_this_month >= BILLING_MONTHLY_DOC_CAP)
+            ack_save = st.checkbox(
+                f"This action will count as 1 billable document (@ {BILLING_CURRENCY} {BILLING_PRICE_PER_DOC:.2f} / doc).",
+                value=False,
+                key="billable_ack_save",
+                disabled=cap_reached,
+            )
+            if cap_reached:
+                st.error("Monthly billable document cap reached. Saving a new version is disabled until next month or cap is raised.")
+            if st.button("Save changes as new version", disabled=(not st.session_state.doc_id) or cap_reached or (not ack_save)):
                 snap["saved_at"] = now_iso()
                 snap["sections"] = sections
                 # Ensure grades are up-to-date
