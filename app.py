@@ -62,7 +62,14 @@ def ensure_secrets_toml_from_env() -> None:
     # Top-level keys
     add(f'GEMINI_API_KEY = "{gemini}"')
 
-    for k in ("PROD", "DEBUG", "ALLOWED_EMAILS", "ALLOWED_DOMAINS", "ENABLE_ROLE_SWITCH", "ENABLE_WORKSPACE_SWITCH"):
+    for k in (
+    "PROD", "DEBUG",
+    "ALLOWED_EMAILS", "ALLOWED_DOMAINS",
+    "ENABLE_ROLE_SWITCH", "ENABLE_WORKSPACE_SWITCH",
+    "ROLES_ADMIN", "ROLES_EDITOR", "ROLES_REVIEWER", "ROLES_VIEWER",
+    "SUPERADMIN_EMAIL", "SUPERADMIN_EMAILS",
+    ):
+
         v = (os.environ.get(k) or "").strip()
         if v:
             add(f'{k} = "{v}"')
