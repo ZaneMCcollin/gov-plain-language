@@ -972,6 +972,18 @@ def _db_init() -> None:
             latest_version_id INTEGER
         )
     """)
+
+    # Source binding: tie a Document ID to the first uploaded file (prevents different PDFs under same ID)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS doc_sources (
+            doc_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            source_name TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_doc_sources_hash ON doc_sources(source_hash)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1108,6 +1120,61 @@ def _ensure_doc(doc_id: str) -> None:
         )
         conn.commit()
     conn.close()
+
+
+# ============================================================
+# Document source binding (anti-abuse for per-document billing)
+# ============================================================
+
+def _get_doc_source(doc_id: str) -> dict:
+    """Return stored source info for doc_id, or {} if none."""
+    try:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("SELECT source_hash, source_name, created_at, updated_at FROM doc_sources WHERE doc_id = ?", (doc_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return {}
+        return {"source_hash": row[0], "source_name": row[1], "created_at": row[2], "updated_at": row[3]}
+    except Exception:
+        return {}
+
+def _bind_doc_source_if_empty(doc_id: str, source_hash: str, source_name: str = "") -> None:
+    """Bind a doc_id to its first source file hash (idempotent)."""
+    if not doc_id or not source_hash:
+        return
+    try:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("SELECT source_hash FROM doc_sources WHERE doc_id = ?", (doc_id,))
+        row = cur.fetchone()
+        now = now_iso()
+        if not row:
+            cur.execute(
+                "INSERT INTO doc_sources(doc_id, created_at, updated_at, source_hash, source_name) VALUES(?,?,?,?,?)",
+                (doc_id, now, now, source_hash, source_name or ""),
+            )
+        conn.commit()
+        conn.close()
+    except Exception:
+        return
+
+def _enforce_doc_source(doc_id: str, source_hash: str, source_name: str = "") -> tuple[bool, str]:
+    """Ensure doc_id isn't reused for a different uploaded file.
+
+    Returns (ok, msg). If no source_hash is provided, enforcement is skipped (ok=True).
+    """
+    if not doc_id or not source_hash:
+        return True, ""
+    existing = _get_doc_source(doc_id)
+    if not existing:
+        _bind_doc_source_if_empty(doc_id, source_hash, source_name)
+        return True, ""
+    if str(existing.get("source_hash") or "") == str(source_hash):
+        return True, ""
+    old_name = existing.get("source_name") or "(unknown file)"
+    return False, f"This Document ID is already tied to a different file: {old_name}. Use a NEW Document ID for a different PDF/DOCX."
 
 def save_version(doc_id: str, snapshot: Dict[str, Any]) -> str:
     _ensure_doc(doc_id)
@@ -2405,6 +2472,13 @@ with left:
 
     if up:
         b = up.getvalue()
+        # Track uploaded file fingerprint for anti-abuse billing (bind doc_id to source file)
+        try:
+            st.session_state['uploaded_file_name'] = up.name
+            st.session_state['uploaded_file_hash'] = hashlib.sha256(b).hexdigest()
+        except Exception:
+            st.session_state['uploaded_file_name'] = up.name if up else ''
+            st.session_state['uploaded_file_hash'] = ''
         key = f"{up.name}:{sha12(b)}:pages={pages}"
 
         should_extract = (key != st.session_state.last_extract_key) or (not st.session_state.input_text.strip())
@@ -2493,6 +2567,28 @@ with left:
 with right:
     if convert_btn:
         safe_text, cut = clamp_text(user_text, MAX_DOC_CHARS)
+
+        # Enforce: a Document ID cannot be reused for a completely different uploaded file
+        doc_id_sc = scoped_doc_id(st.session_state.doc_id, st.session_state.workspace)
+        up_hash = str(st.session_state.get('uploaded_file_hash', '') or '')
+        up_name = str(st.session_state.get('uploaded_file_name', '') or '')
+        ok_src, msg_src = _enforce_doc_source(doc_id_sc, up_hash, up_name)
+        if not ok_src:
+            st.error(msg_src)
+            log_audit(
+                event='doc_source_mismatch_blocked',
+                user_email=AUTH_EMAIL,
+                workspace=st.session_state.workspace,
+                doc_id=st.session_state.doc_id,
+                meta={'new_file': up_name, 'new_hash': up_hash[:12], 'doc_id_scoped': doc_id_sc},
+            )
+            # One-click helper: generate a new Document ID (forces a new billable doc)
+            if st.button('Create NEW Document ID and continue', type='primary'):
+                st.session_state.doc_id = f"doc-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+                st.session_state.snapshot = None
+                st.session_state.last_extract_key = ''
+                st.rerun()
+            st.stop()
 
         doc_lang = detect_lang(safe_text)
         st.session_state.extract_meta = st.session_state.extract_meta or {}
