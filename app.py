@@ -695,7 +695,7 @@ st.session_state.workspace = _safe_workspace_key(active_workspace)
 # ============================================================
 
 ROLE_PERMS = {
-    "admin":    {"convert", "export", "approve", "edit_outputs", "rollback", "analytics"},
+    "admin":    {"convert", "export", "approve", "edit_outputs", "rollback", "analytics", "role_admin", "workspace_switch"},
     "reviewer": {"export", "approve", "edit_outputs"},
     "editor":   {"convert", "export", "edit_outputs"},
     "viewer":   set(),
@@ -703,7 +703,17 @@ ROLE_PERMS = {
 
 def can(action: str) -> bool:
     role = st.session_state.get("auth_role", "viewer")
-    prod = str(os.getenv("PROD", "false")).lower() == "true"
+    prod = str(os.getenv("PROD", "false")).lower() in ("1", "true", "yes")
+
+    # Admin can do everything
+    if role == "admin":
+        return True
+
+    # Hard PROD lock: only admin can use these
+    if prod and action in {"convert", "edit_outputs", "rollback", "analytics", "role_admin", "workspace_switch"}:
+        return False
+
+    return action in ROLE_PERMS.get(role, set())
 
     # Admin can do everything
     if role == "admin":
@@ -808,10 +818,10 @@ def billable_docs_count_range(start_iso: str, end_iso: str) -> int:
         """,
         (start_iso, end_iso, *BILLABLE_ACTIONS),
     )
-    n = cur.fetchone()[0] if cur.fetchone is not None else 0
+    row = cur.fetchone()
+    n = row[0] if row and row[0] is not None else 0
     conn.close()
     return int(n or 0)
-
 
 def billable_docs_breakdown_by_workspace(start_iso: str, end_iso: str) -> list[tuple[str, int]]:
     """Return list of (workspace, distinct_docs) for the invoice period."""
@@ -2054,6 +2064,76 @@ def build_compliance_report_pdf(snapshot: Dict[str, Any]) -> bytes:
 
         c.drawString(1 * inch, y, row[:120])
         y -= 12
+
+    c.save()
+    return buff.getvalue()
+
+
+def build_invoice_pdf_summary(start_iso: str, end_iso: str) -> bytes:
+    """Generate a simple invoice summary PDF for the selected period (system-wide)."""
+    inv_docs = int(billable_docs_count_range(start_iso, end_iso) or 0)
+    inv_total = round(inv_docs * float(BILLING_PRICE_PER_DOC), 2)
+    per_ws = billable_docs_breakdown_by_workspace(start_iso, end_iso) or []
+
+    buff = io.BytesIO()
+    c = canvas.Canvas(buff, pagesize=letter)
+    width, height = letter
+
+    y = height - 1 * inch
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(1 * inch, y, "Invoice Summary — GovCan Plain Language Converter")
+    y -= 22
+
+    c.setFont("Helvetica", 11)
+    c.drawString(1 * inch, y, f"Vendor: {BILLING_VENDOR_NAME}")
+    y -= 14
+    if BILLING_VENDOR_CONTACT:
+        c.drawString(1 * inch, y, f"Contact: {BILLING_VENDOR_CONTACT}")
+        y -= 14
+
+    c.drawString(1 * inch, y, f"Period (UTC): {start_iso[:10]} to {end_iso[:10]}")
+    y -= 14
+    c.drawString(1 * inch, y, f"Generated (UTC): {datetime.now(timezone.utc).isoformat()}")
+    y -= 18
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(1 * inch, y, "Summary")
+    y -= 16
+
+    c.setFont("Helvetica", 11)
+    c.drawString(1 * inch, y, f"Billable documents: {inv_docs}")
+    y -= 14
+    c.drawString(1 * inch, y, f"Rate: {BILLING_CURRENCY} {float(BILLING_PRICE_PER_DOC):.2f} per document")
+    y -= 14
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(1 * inch, y, f"Estimated total: {BILLING_CURRENCY} {inv_total:.2f}")
+    y -= 20
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(1 * inch, y, "Breakdown by workspace (distinct documents)")
+    y -= 16
+
+    c.setFont("Helvetica", 10)
+    if not per_ws:
+        c.drawString(1 * inch, y, "— No billable documents in this period.")
+        y -= 12
+    else:
+        for ws, n in per_ws:
+            if y < 1 * inch:
+                c.showPage()
+                y = height - 1 * inch
+                c.setFont("Helvetica", 10)
+            c.drawString(1 * inch, y, f"- {ws}: {int(n)}")
+            y -= 12
+
+    y -= 10
+    c.setFont("Helvetica-Oblique", 9)
+    c.drawString(
+        1 * inch,
+        y,
+        "Note: Estimate is based on distinct document IDs saved with billable actions in the period.",
+    )
 
     c.save()
     return buff.getvalue()
